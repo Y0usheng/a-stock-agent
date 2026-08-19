@@ -263,6 +263,7 @@ async def run_market(
     mock: bool,
     manager_provider: str | None = None,
     risk_provider: str | None = None,
+    prompt_version: str | None = None,
     force: bool = False,
 ):
     async with McpHost(market) as host:
@@ -319,6 +320,7 @@ async def run_market(
                 memory,
                 manager_provider=manager_provider,
                 risk_provider=risk_provider,
+                prompt_version=prompt_version,
             )
             mode = "openai_agents_sdk"
 
@@ -380,6 +382,10 @@ async def main():
         "--risk-provider", choices=["openai", "deepseek"], default=None,
         help="风险经理模型提供商;默认读取 ASTOCK_RISK_PROVIDER(deepseek)",
     )
+    parser.add_argument(
+        "--prompt-version", choices=["manager-v1", "manager-v2"], default=None,
+        help="不可变 Prompt 版本；默认读取 ASTOCK_PROMPT_VERSION(manager-v1)",
+    )
     parser.add_argument("--force", action="store_true",
                         help="无成交时允许覆盖同日分析日志；已有成交时仍安全跳过")
     parser.add_argument("--market", choices=["cn", "us", "both"], default="both")
@@ -393,6 +399,7 @@ async def main():
             args.mock,
             manager_provider=args.manager_provider,
             risk_provider=args.risk_provider,
+            prompt_version=args.prompt_version,
             force=args.force,
         )
 

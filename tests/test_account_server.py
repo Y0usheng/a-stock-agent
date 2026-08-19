@@ -98,7 +98,7 @@ class AccountRulesTests(unittest.TestCase):
 
     def test_t_plus_one_only_freezes_shares_bought_today(self):
         self.assertTrue(self._buy("600519", "贵州茅台", 1000, 100, "old")["ok"])
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (date.fromisoformat(self.trade_date) - timedelta(days=1)).isoformat()
         conn = sqlite3.connect(account.DB_PATH)
         try:
             conn.execute("UPDATE trades SET trade_date=?", (yesterday,))

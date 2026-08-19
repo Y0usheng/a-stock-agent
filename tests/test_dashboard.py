@@ -29,15 +29,21 @@ class DashboardOverviewTests(unittest.TestCase):
         conn.close()
         self.old_markets = dashboard.MARKETS
         self.old_log_dir = dashboard.LOG_DIR
+        self.old_experiment_db = dashboard.EXPERIMENT_DB
+        self.old_news_db = dashboard.NEWS_DB
         dashboard.MARKETS = {"cn": {
             "name": "A股", "currency": "CNY", "initial_cash": 1000.0,
             "db": self.db, "watchlist": [{"symbol": "AAA", "name": "测试股票"}],
         }}
         dashboard.LOG_DIR = self.logs
+        dashboard.EXPERIMENT_DB = root / "experiments.db"
+        dashboard.NEWS_DB = root / "news.db"
 
     def tearDown(self):
         dashboard.MARKETS = self.old_markets
         dashboard.LOG_DIR = self.old_log_dir
+        dashboard.EXPERIMENT_DB = self.old_experiment_db
+        dashboard.NEWS_DB = self.old_news_db
         self.temp.cleanup()
 
     def _write_log(self, day, price):
@@ -63,6 +69,12 @@ class DashboardOverviewTests(unittest.TestCase):
         self.assertEqual(payload["positions"][0]["last_price"], 12.0)
         self.assertEqual(payload["positions"][0]["pnl_amount"], 20.0)
         self.assertIsNone(payload["data_warning"])
+
+    def test_experiment_endpoint_is_empty_but_well_formed_before_first_run(self):
+        payload = dashboard.app.test_client().get("/api/experiments").get_json()
+        self.assertEqual(payload["runs"], [])
+        self.assertEqual(payload["comparisons"], [])
+        self.assertEqual(payload["news_dataset"]["event_count"], 0)
 
 
 if __name__ == "__main__":

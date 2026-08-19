@@ -15,7 +15,9 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import MARKETS
+from config import EXPERIMENT_DB, MARKETS, NEWS_DB
+from evals.experiments import record_experiment
+from evals.news_store import load_news_scores
 from evals.performance import indexed_curve, performance_metrics
 
 
@@ -176,14 +178,17 @@ def walk_forward_backtest(histories: dict[str, pd.DataFrame], market: str,
 
 def news_ab_eval(histories: dict[str, pd.DataFrame], market: str,
                  window_days: int = 90,
-                 news_scores: dict[tuple[str, str], float] | None = None) -> dict:
+                 news_scores: dict[tuple[str, str], float] | None = None,
+                 news_manifest: dict | None = None) -> dict:
     with_news = walk_forward_backtest(histories, market, window_days, True, news_scores)
     without_news = walk_forward_backtest(histories, market, window_days, False, news_scores)
     left = with_news["metrics"].get("total_return_pct")
     right = without_news["metrics"].get("total_return_pct")
     return {
         "market": market, "window_days": window_days,
-        "data_quality": "synthetic_news" if news_scores is None else "provided_historical_news",
+        "data_quality": ((news_manifest or {}).get("data_quality") if news_scores is not None
+                         else "synthetic_news") or "provided_historical_news",
+        "news_dataset": news_manifest,
         "with_news": with_news, "without_news": without_news,
         "return_delta_pct": round(left - right, 4) if left is not None and right is not None else None,
         "trade_count_delta": len(with_news["trades"]) - len(without_news["trades"]),
@@ -195,6 +200,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", choices=["cn", "us", "both"], default="both")
     parser.add_argument("--window", type=int, default=90, help="60到120个交易日")
+    parser.add_argument("--historical-news", action="store_true",
+                        help="从 SQLite 读取真实/导入历史新闻；无事件时拒绝伪装成真实实验")
+    parser.add_argument("--news-db", type=Path, default=NEWS_DB)
+    parser.add_argument("--record-experiment", action="store_true")
+    parser.add_argument("--experiment-db", type=Path, default=EXPERIMENT_DB)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     markets = ["cn", "us"] if args.market == "both" else [args.market]
@@ -206,14 +216,49 @@ def main():
             item["symbol"]: module._mock_history(item["symbol"], args.window + 80)
             for item in MARKETS[market]["watchlist"]
         }
-        reports[market] = news_ab_eval(histories, market, args.window)
+        news_scores = None
+        manifest = None
+        if args.historical_news:
+            common_dates = sorted(set.intersection(*(
+                set(frame["date"].astype(str)) for frame in histories.values()
+            )))
+            evaluation_dates = common_dates[-args.window:]
+            news_scores, manifest = load_news_scores(
+                market, evaluation_dates[0], evaluation_dates[-1], args.news_db
+            )
+            if not manifest["event_count"]:
+                raise RuntimeError(
+                    f"{market} 在 {evaluation_dates[0]}~{evaluation_dates[-1]} 没有真实历史新闻；"
+                    "请先积累实时事件或导入供应商历史数据，未降级为合成新闻"
+                )
+        reports[market] = news_ab_eval(
+            histories, market, args.window, news_scores, manifest
+        )
+        if args.record_experiment:
+            report = reports[market]
+            dataset = {
+                "market": market, "window_days": args.window,
+                "price_source": "deterministic_synthetic_history",
+                "news": manifest or {"data_quality": "synthetic_news",
+                                      "fingerprint": "synthetic-news-ab-v1"},
+            }
+            record_experiment(
+                "news-on-vs-off", market, dataset,
+                {"strategy": "technical-news-gate-v1", "news_enabled_variants": [True, False]},
+                {"return_delta_pct": report["return_delta_pct"],
+                 "trade_count_delta": report["trade_count_delta"],
+                 "with_news": report["with_news"]["metrics"],
+                 "without_news": report["without_news"]["metrics"]},
+                db_path=args.experiment_db,
+                notes="价格使用确定性工程夹具；真实收益结论需换成真实历史行情。",
+            )
     if args.json:
         print(json.dumps(reports, ensure_ascii=False, indent=2))
         return
     for market, report in reports.items():
         on = report["with_news"]["metrics"]
         off = report["without_news"]["metrics"]
-        print(f"\n[{market}] {report['window_days']}日滚动新闻 A/B（离线合成新闻）")
+        print(f"\n[{market}] {report['window_days']}日滚动新闻 A/B（{report['data_quality']}）")
         print(f"  新闻开启收益: {on['total_return_pct']:.2f}% | 关闭: {off['total_return_pct']:.2f}% | 差值: {report['return_delta_pct']:.2f}%")
         print(f"  开启后最大回撤: {on['max_drawdown_pct']:.2f}% | 成交数: {len(report['with_news']['trades'])}")
 

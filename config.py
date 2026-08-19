@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 DATA_DIR = Path(os.environ.get("ASTOCK_DATA_DIR", ROOT / "data"))
+NEWS_DB = Path(os.environ.get("ASTOCK_NEWS_DB", DATA_DIR / "news_events.db"))
+EXPERIMENT_DB = Path(os.environ.get("ASTOCK_EXPERIMENT_DB", DATA_DIR / "experiments.db"))
 
 MAX_POSITION_PCT = 0.30      # 单只股票最大仓位占总资产比例(两市场通用)
 
@@ -94,3 +96,4 @@ DEFAULT_OPENAI_MODEL = "gpt-5.6"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_MANAGER_PROVIDER = "openai"
 DEFAULT_RISK_PROVIDER = "deepseek"
+DEFAULT_PROMPT_VERSION = "manager-v1"

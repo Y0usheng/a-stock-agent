@@ -24,7 +24,8 @@ warnings.filterwarnings("ignore", message=r"Field 'lifespan' has an incomplete d
 from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
-from config import MARKETS
+from config import MARKETS, NEWS_DB
+from evals.news_store import ingest_events, query_events
 
 if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
@@ -234,15 +235,29 @@ def get_symbol_news(symbol: str, as_of_date: str = "", days: int = 3,
         return _cache[key]
     if FORCE_OFFLINE:
         events = _mock_news(symbol, as_of_date)
+        for item in events:
+            item["data_quality"] = "synthetic"
     else:
+        # 历史回放先读本地事件库；实时查询成功后再幂等追加，逐日积累真实语料。
+        stored = query_events(MARKET, symbol, as_of_date, days, limit, NEWS_DB)
+        for item in stored:
+            item["name"] = UNIVERSE[symbol]
         try:
-            events = (_cn_live_news(symbol, as_of_date, days, limit) if MARKET == "cn"
-                      else _alpha_news(symbol, as_of_date, days, limit) + _yahoo_news(symbol, limit))
+            live = (_cn_live_news(symbol, as_of_date, days, limit) if MARKET == "cn"
+                    else _alpha_news(symbol, as_of_date, days, limit) + _yahoo_news(symbol, limit))
         except Exception as exc:
             print(f"[news-{MARKET}] {symbol} 实时新闻失败:{exc}", file=sys.stderr)
-            events = []
+            live = []
         # 严格按行情截面过滤，防止历史回放读取未来新闻。
-        events = [item for item in events if _within_window(item, as_of_date, days)]
+        live = [item for item in live if _within_window(item, as_of_date, days)]
+        for item in live:
+            item["data_quality"] = "live"
+        if live:
+            try:
+                ingest_events(live, MARKET, "live", NEWS_DB)
+            except Exception as exc:
+                print(f"[news-{MARKET}] 新闻落库失败:{exc}", file=sys.stderr)
+        events = stored + live
     _cache[key] = _dedupe(events, limit)
     return _cache[key]
 

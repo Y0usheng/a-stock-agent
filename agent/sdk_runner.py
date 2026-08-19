@@ -10,6 +10,7 @@ from time import perf_counter
 from typing import Any
 
 from agent.memory import memory_prompt
+from agent.prompt_registry import prompt_manifest, render_versioned_prompt, resolve_prompt_version
 from config import (
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_MANAGER_PROVIDER,
@@ -282,7 +283,8 @@ def build_read_only_tools(host) -> dict[str, Any]:
     }
 
 
-def _system_prompt(market: str, as_of_date: str, active_symbols: list[str] | None = None) -> str:
+def _system_prompt(market: str, as_of_date: str, active_symbols: list[str] | None = None,
+                   prompt_version: str | None = None) -> str:
     market_config = MARKETS[market]
     lot_rule = (
         f"股数必须是 {market_config['lot_size']} 的整数倍"
@@ -292,7 +294,7 @@ def _system_prompt(market: str, as_of_date: str, active_symbols: list[str] | Non
     settlement = "T+1，当日新增股份不可当日卖出" if market_config["t_plus_1"] else "T+0"
     schema = json.dumps(RESULT_SCHEMA, ensure_ascii=False, separators=(",", ":"))
     symbols = ", ".join(active_symbols or [item["symbol"] for item in market_config["watchlist"]])
-    return f"""你是{market_config['name']}模拟盘的投资经理，行情截面日为 {as_of_date}。
+    base = f"""你是{market_config['name']}模拟盘的投资经理，行情截面日为 {as_of_date}。
 今日动态候选池为：{symbols}。候选池来自受控股票宇宙的新闻关注度筛选，不代表看多。
 严格按顺序工作：
 1. 调用 technical_analysis；
@@ -308,6 +310,7 @@ def _system_prompt(market: str, as_of_date: str, active_symbols: list[str] | Non
 5 个交易日预测。analyst_views 必须忠实概括实际专家输出。
 
 最后只输出一个 JSON 对象，不要 Markdown 代码围栏。JSON Schema：{schema}"""
+    return render_versioned_prompt(base, prompt_version)[0]
 
 
 def build_agents(
@@ -316,6 +319,7 @@ def build_agents(
     as_of_date: str,
     routing: dict[str, RoleModel],
     model_factory: ModelFactory | None = None,
+    prompt_version: str | None = None,
 ):
     """构建三个只读专家和一个保留最终控制权的投资经理。"""
     from agents import Agent
@@ -349,7 +353,9 @@ def build_agents(
     manager_definition = definitions["investment-manager"]
     manager = Agent(
         name="investment-manager",
-        instructions=_system_prompt(market, as_of_date, getattr(host, "active_symbols", None)),
+        instructions=_system_prompt(
+            market, as_of_date, getattr(host, "active_symbols", None), prompt_version
+        ),
         model=factory.model_for(manager_definition.model),
         tools=[
             tools["market_watchlist_snapshot"],
@@ -434,6 +440,7 @@ async def run_agent_sdk(
     memory: dict,
     manager_provider: str | None = None,
     risk_provider: str | None = None,
+    prompt_version: str | None = None,
 ) -> dict:
     """运行 OpenAI Agents SDK，并返回结构化决策及可审计元数据。"""
     from agents import RunConfig, Runner
@@ -441,7 +448,12 @@ async def run_agent_sdk(
 
     started = perf_counter()
     routing = resolve_role_routing(manager_provider, risk_provider)
-    manager = build_agents(host, market, as_of_date, routing)
+    prompt_version = resolve_prompt_version(prompt_version)
+    rendered_prompt = _system_prompt(
+        market, as_of_date, getattr(host, "active_symbols", None), prompt_version
+    )
+    manifest = prompt_manifest(rendered_prompt, prompt_version)
+    manager = build_agents(host, market, as_of_date, routing, prompt_version=prompt_version)
     tracing_enabled = os.environ.get("ASTOCK_OPENAI_TRACING", "0").lower() in {
         "1", "true", "yes"
     }
@@ -454,6 +466,8 @@ async def run_agent_sdk(
             "as_of_date": as_of_date,
             "manager_provider": routing["investment-manager"].provider,
             "risk_provider": routing["risk-manager"].provider,
+            "prompt_version": manifest["version"],
+            "prompt_sha256": manifest["sha256"],
         },
     )
     prompt = "开始今日多角色决策。\n\n" + memory_prompt(memory)
@@ -482,5 +496,6 @@ async def run_agent_sdk(
             "total_tokens": usage.total_tokens,
         },
         "role_models": {name: asdict(selection) for name, selection in routing.items()},
+        "prompt": manifest,
     }
     return result

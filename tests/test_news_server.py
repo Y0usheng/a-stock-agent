@@ -35,11 +35,23 @@ class NewsServerTests(unittest.TestCase):
 
     def test_live_provider_failure_does_not_fall_back_to_mock_news(self):
         with patch.object(news_server, "FORCE_OFFLINE", False), \
-             patch.object(news_server, "_cn_live_news", return_value=[]):
+             patch.object(news_server, "_cn_live_news", return_value=[]), \
+             patch.object(news_server, "query_events", return_value=[]):
             result = news_server.screen_news_candidates("2026-08-19", limit=5, days=3)
         self.assertFalse(result["ok"])
         self.assertEqual(result["data_sources"], [])
         self.assertTrue(all(item["article_count"] == 0 for item in result["candidates"]))
+
+    def test_live_events_are_persisted_but_mock_events_are_not(self):
+        event = news_server._event("600519", "公司回购", "2026-08-19T09:00:00",
+                                   "provider")
+        with patch.object(news_server, "FORCE_OFFLINE", False), \
+             patch.object(news_server, "_cn_live_news", return_value=[event]), \
+             patch.object(news_server, "query_events", return_value=[]), \
+             patch.object(news_server, "ingest_events") as ingest:
+            result = news_server.get_symbol_news("600519", "2026-08-19", 3, 5)
+        self.assertEqual(result[0]["data_quality"], "live")
+        ingest.assert_called_once()
 
 
 if __name__ == "__main__":

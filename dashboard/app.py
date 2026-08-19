@@ -17,12 +17,15 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import MARKETS, LOG_DIR
+from config import EXPERIMENT_DB, MARKETS, LOG_DIR, NEWS_DB
+from evals.calibration import chronological_calibration
+from evals.experiments import comparable_experiments, list_experiments
 from evals.metrics import (EVALUATION_HISTORY_DAYS,
                            actual_direction_from_frame,
                            prediction_start_date,
                            uses_synthetic_data)
 from evals.performance import indexed_curve, load_valuation_snapshots, performance_report
+from evals.news_store import dataset_summary
 
 from flask import Flask, jsonify
 
@@ -193,9 +196,21 @@ def score():
                 ok = act == p["direction"]
                 stats[mkt]["total"] += 1
                 stats[mkt]["hit"] += ok
+                sdk = d.get("agent_sdk") or {}
                 rows.append({"date": start, "market": mkt, "symbol": p["symbol"],
-                             "pred": p["direction"], "actual": act, "hit": ok})
-    return jsonify({"stats": stats, "rows": rows[-100:]})
+                             "pred": p["direction"], "actual": act, "hit": ok,
+                             "correct": ok, "confidence": p.get("confidence"),
+                             "prompt_version": (sdk.get("prompt") or {}).get("version", "unversioned")})
+    return jsonify({"stats": stats, "rows": rows[-100:],
+                    "calibration": chronological_calibration(rows)})
+
+
+@app.route("/api/experiments")
+def experiments():
+    """只读返回实验注册表和真实历史新闻覆盖情况。"""
+    return jsonify({"runs": list_experiments(EXPERIMENT_DB, 30),
+                    "comparisons": comparable_experiments(EXPERIMENT_DB),
+                    "news_dataset": dataset_summary(NEWS_DB)})
 
 
 @app.route("/api/performance")
@@ -321,6 +336,12 @@ canvas { max-height:220px; }
   <div id="perfBox" class="muted">累计收益、时变候选基准、波动、回撤、Sharpe、Sortino 与换手率</div>
   <div class="grid" style="margin-top:14px"><div><h2>组合 vs 时变候选基准</h2><canvas id="perfCurve"></canvas></div>
   <div><h2>组合回撤</h2><canvas id="drawdownCurve"></canvas></div></div>
+</div>
+
+<div class="card full" style="margin-top:16px">
+  <h2>🧪 第三阶段实验台
+    <button id="expBtn" onclick="loadExperiments()">刷新实验</button></h2>
+  <div id="experimentBox" class="muted">加载历史新闻覆盖、Prompt/模型版本和可复现实验记录…</div>
 </div>
 
 <script>
@@ -469,6 +490,10 @@ async function loadScore() {
     }
     html += "</tbody></table>";
   }
+  const cal = s.calibration || {};
+  html += `<div style="margin-top:10px"><b>置信度校准</b>：${cal.status === "complete"
+    ? `未来验证 ${cal.test_count} 条 · 原始 Brier ${metric(cal.raw.brier_score)} / ECE ${metric(cal.raw.expected_calibration_error)} · 校准后 Brier ${metric(cal.calibrated.brier_score)} / ECE ${metric(cal.calibrated.expected_calibration_error)}`
+    : esc(cal.message || "样本不足")}</div>`;
   document.getElementById("scoreBox").innerHTML = html;
   btn.disabled = false; btn.textContent = "重新计算";
 }
@@ -514,7 +539,44 @@ async function loadPerformance() {
   btn.disabled = false; btn.textContent = "重新计算";
 }
 
+async function loadExperiments() {
+  const btn = document.getElementById("expBtn");
+  btn.disabled = true; btn.textContent = "加载中…";
+  try {
+    const data = await (await fetch("/api/experiments")).json();
+    const news = data.news_dataset || {event_count:0,markets:{}};
+    let html = `<div><b>历史新闻库</b>：${news.event_count || 0} 条真实/导入事件`;
+    for (const [market, qualities] of Object.entries(news.markets || {})) {
+      const detail = Object.entries(qualities).map(([quality, item]) =>
+        `${quality} ${item.count}条 (${item.first_day}~${item.last_day})`).join("；");
+      html += `<div class=muted>${esc(market)}：${esc(detail)}</div>`;
+    }
+    html += "</div>";
+    html += `<div style="margin-top:6px"><b>严格可比 A/B 组</b>：${data.comparisons?.length || 0} 组` +
+      `<span class=muted>（数据指纹相同且变体不同）</span></div>`;
+    if (data.runs?.length) {
+      html += "<table style='margin-top:10px'><thead><tr><th>时间</th><th>实验</th><th>市场</th><th>Prompt / 模型</th><th>数据指纹</th><th>状态</th></tr></thead><tbody>";
+      for (const run of data.runs) {
+        const variant = run.variant || {};
+        const roles = Object.values(variant.role_models || {}).map(x => x.model).filter(Boolean).join(" / ");
+        html += `<tr><td>${esc(run.created_at)}</td><td>${esc(run.name)}</td><td>${esc(run.market)}</td>` +
+          `<td>${esc(variant.prompt_version || "-")}<div class=muted>${esc(roles || variant.mode || "-")}</div></td>` +
+          `<td>${esc(run.dataset_fingerprint.slice(0,12))}</td><td>${esc(run.status)}</td></tr>`;
+      }
+      html += "</tbody></table>";
+    } else {
+      html += "<div class=muted style='margin-top:8px'>尚无已登记实验；真实新闻积累后运行实验 CLI。</div>";
+    }
+    document.getElementById("experimentBox").innerHTML = html;
+  } catch (error) {
+    document.getElementById("experimentBox").textContent = "实验数据加载失败：" + error.message;
+  } finally {
+    btn.disabled = false; btn.textContent = "刷新实验";
+  }
+}
+
 load();
+loadExperiments();
 setInterval(load, 60000);
 </script>
 </body>
