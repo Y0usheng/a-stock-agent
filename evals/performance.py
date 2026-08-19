@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import json
+import sqlite3
+from pathlib import Path
 from statistics import mean, pstdev
 
 from evals.metrics import EVALUATION_HISTORY_DAYS, prediction_start_date, uses_synthetic_data
@@ -144,7 +147,75 @@ def equal_weight_curve(frames: dict, dates: list[str]) -> list[dict]:
     return curve
 
 
-def performance_report(logs: list[dict], data_module, watchlist: list[dict]) -> dict:
+def time_varying_equal_weight_curve(frames: dict, schedule: list[dict]) -> list[dict]:
+    """无未来泄漏时变基准。
+
+    每个区间使用区间起点已知的候选成分，计算到下一评估日的等权收益；未来入选股票
+    不会影响其入选前的区间。
+    """
+    normalized = {}
+    for item in schedule:
+        day = str(item.get("date") or "")
+        symbols = list(dict.fromkeys(str(symbol) for symbol in item.get("symbols", []) if symbol))
+        if day and symbols:
+            normalized[day] = symbols
+    ordered_dates = sorted(normalized)
+    if not ordered_dates:
+        return []
+    series = {}
+    for symbol, frame in frames.items():
+        pairs = sorted((str(row["date"]), float(row["close"])) for _, row in frame.iterrows())
+        if pairs:
+            series[symbol] = pairs
+
+    def asof(symbol: str, target: str):
+        eligible = [price for day, price in series.get(symbol, []) if day <= target]
+        return eligible[-1] if eligible else None
+
+    total = 1.0
+    curve = [{"date": ordered_dates[0], "total": total,
+              "constituents": normalized[ordered_dates[0]]}]
+    for previous_day, current_day in zip(ordered_dates, ordered_dates[1:]):
+        returns = []
+        for symbol in normalized[previous_day]:
+            previous = asof(symbol, previous_day)
+            current = asof(symbol, current_day)
+            if previous and current:
+                returns.append(current / previous - 1)
+        if returns:
+            total *= 1 + mean(returns)
+        curve.append({"date": current_day, "total": total,
+                      "constituents": normalized[current_day],
+                      "priced_constituents": len(returns)})
+    return curve
+
+
+def load_valuation_snapshots(db_path: Path) -> list[dict]:
+    """从账户数据库读取持久化估值；旧数据库没有该表时返回空列表。"""
+    if not Path(db_path).exists():
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='valuation_snapshots'"
+        ).fetchone()
+        if not exists:
+            return []
+        rows = [dict(row) for row in conn.execute(
+            "SELECT * FROM valuation_snapshots ORDER BY snapshot_date"
+        )]
+    finally:
+        conn.close()
+    for row in rows:
+        for key in ("positions_json", "prices_json", "data_sources_json"):
+            row[key.removesuffix("_json")] = json.loads(row.pop(key))
+    return rows
+
+
+def performance_report(logs: list[dict], data_module, watchlist: list[dict],
+                       valuation_snapshots: list[dict] | None = None,
+                       trades: list[dict] | None = None) -> dict:
     """生成组合相对股票池等权基准的收益风险报告。"""
     valid = [log for log in logs if prediction_start_date(log)
              and _finite(log.get("account_after", {}).get("total_assets"))]
@@ -155,8 +226,15 @@ def performance_report(logs: list[dict], data_module, watchlist: list[dict]) -> 
                 "excess_return_pct": None, "trade_count": 0, "turnover_pct": None,
                 "data_quality": {"status": "no_data", "message": "暂无有效资产快照"}}
 
-    points = [{"date": prediction_start_date(log),
-               "total": log["account_after"]["total_assets"]} for log in valid]
+    durable_points = [
+        {"date": item.get("snapshot_date"), "total": item.get("total_assets")}
+        for item in (valuation_snapshots or [])
+        if item.get("snapshot_date") and _finite(item.get("total_assets"))
+    ]
+    points = durable_points or [
+        {"date": prediction_start_date(log), "total": log["account_after"]["total_assets"]}
+        for log in valid
+    ]
     initial = valid[0]["account_after"].get("initial_cash")
     portfolio = performance_metrics(points, initial)
 
@@ -166,23 +244,37 @@ def performance_report(logs: list[dict], data_module, watchlist: list[dict]) -> 
     fetch = data_module._mock_history if synthetic else data_module._fetch_history
     frames = {}
     fetch_errors = []
+    fallback_symbols = [item["symbol"] for item in watchlist]
+    log_schedule = []
+    for log in valid:
+        symbols = log.get("active_symbols") or fallback_symbols
+        log_schedule.append({"date": prediction_start_date(log), "symbols": symbols})
+    schedule = []
+    for point in sorted(points, key=lambda item: item["date"]):
+        eligible = [item for item in log_schedule if item["date"] <= point["date"]]
+        symbols = eligible[-1]["symbols"] if eligible else fallback_symbols
+        schedule.append({"date": point["date"], "symbols": symbols})
+    required_symbols = sorted({symbol for item in schedule for symbol in item["symbols"]})
     if not mixed_sources:
-        for item in watchlist:
+        for symbol in required_symbols:
             try:
-                frames[item["symbol"]] = fetch(item["symbol"], EVALUATION_HISTORY_DAYS)
+                frames[symbol] = fetch(symbol, EVALUATION_HISTORY_DAYS)
             except Exception as exc:
-                fetch_errors.append(f"{item['symbol']}:{exc}")
-    benchmark_curve = equal_weight_curve(frames, [point["date"] for point in points])
+                fetch_errors.append(f"{symbol}:{exc}")
+    benchmark_curve = time_varying_equal_weight_curve(frames, schedule)
     benchmark = performance_metrics(benchmark_curve, 1.0)
 
     notionals = []
-    for log in valid:
-        for decision in log.get("decisions", []):
-            if decision.get("action") in {"BUY", "SELL"}:
-                try:
-                    notionals.append(abs(float(decision["shares"]) * float(decision["price"])))
-                except (KeyError, TypeError, ValueError):
-                    pass
+    if trades is not None:
+        trade_items = trades
+    else:
+        trade_items = [decision for log in valid for decision in log.get("decisions", [])]
+    for decision in trade_items:
+        if decision.get("action") in {"BUY", "SELL"}:
+            try:
+                notionals.append(abs(float(decision["shares"]) * float(decision["price"])))
+            except (KeyError, TypeError, ValueError):
+                pass
     average_assets = mean(point["total"] for point in points)
     turnover = sum(notionals) / average_assets * 100 if average_assets > 0 else None
     p_return = portfolio.get("total_return_pct")
@@ -205,5 +297,7 @@ def performance_report(logs: list[dict], data_module, watchlist: list[dict]) -> 
         "trade_count": len(notionals),
         "turnover_pct": round(turnover, 4) if turnover is not None else None,
         "data_quality": {"status": status, "message": message,
-                         "synthetic": synthetic, "fetch_errors": fetch_errors[:5]},
+                         "synthetic": synthetic, "fetch_errors": fetch_errors[:5],
+                         "portfolio_source": "valuation_snapshots" if durable_points else "decision_logs",
+                         "benchmark_method": "previous-period dynamic constituents"},
     }

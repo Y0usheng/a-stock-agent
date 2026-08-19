@@ -22,7 +22,7 @@ from evals.metrics import (EVALUATION_HISTORY_DAYS,
                            actual_direction_from_frame,
                            prediction_start_date,
                            uses_synthetic_data)
-from evals.performance import indexed_curve, performance_report
+from evals.performance import indexed_curve, load_valuation_snapshots, performance_report
 
 from flask import Flask, jsonify
 
@@ -64,12 +64,6 @@ def _logs(market: str) -> list:
             pass
     out.sort(key=lambda item: str(item.get("as_of_date") or item.get("date") or ""))
     return out
-
-
-def _dynamic_universe(logs: list[dict], config: dict) -> list[dict]:
-    symbols = {symbol for log in logs for symbol in log.get("active_symbols", [])}
-    source = config.get("candidate_universe", config["watchlist"])
-    return [item for item in source if not symbols or item["symbol"] in symbols]
 
 
 @app.route("/api/overview")
@@ -115,13 +109,21 @@ def overview():
         for p in pos:
             p["weight_pct"] = round(p["market_value"] / total * 100, 2) if total else 0.0
 
-        # 资产曲线来自每日日志；若账本比日志更新，追加一个明确标记的估算点。
+        # 优先使用 SQLite 持久化每日估值；旧数据才回退到 JSON 日志。
         curve_by_date = {}
-        for item in logs:
-            day = str(item.get("as_of_date") or item.get("date") or "")
-            value = item.get("account_after", {}).get("total_assets")
-            if day and value:
-                curve_by_date[day] = {"date": day, "total": value, "estimated": False}
+        valuation_snapshots = load_valuation_snapshots(m["db"])
+        if valuation_snapshots:
+            for item in valuation_snapshots:
+                day = str(item.get("snapshot_date") or "")
+                value = item.get("total_assets")
+                if day and value:
+                    curve_by_date[day] = {"date": day, "total": value, "estimated": False}
+        else:
+            for item in logs:
+                day = str(item.get("as_of_date") or item.get("date") or "")
+                value = item.get("account_after", {}).get("total_assets")
+                if day and value:
+                    curve_by_date[day] = {"date": day, "total": value, "estimated": False}
         ledger_dates = [str(t.get("trade_date") or "") for t in trades if t.get("trade_date")]
         valuation_date = max(ledger_dates + ([price_as_of] if price_as_of else []) or
                              [date.today().isoformat()])
@@ -159,6 +161,7 @@ def overview():
             "price_as_of": price_as_of or None,
             "valuation_date": valuation_date,
             "data_warning": warning,
+            "valuation_source": "sqlite_snapshots" if valuation_snapshots else "decision_logs",
         }
     return jsonify(data)
 
@@ -197,7 +200,7 @@ def score():
 
 @app.route("/api/performance")
 def performance():
-    """收益风险指标与股票池等权基准；真实行情可能较慢，由前端按钮触发。"""
+    """收益风险指标与无未来泄漏时变候选基准；真实行情可能较慢。"""
     sys.path.insert(0, str(Path(__file__).parent.parent / "servers"))
     import market_server, us_market_server
     sources = {"cn": market_server, "us": us_market_server}
@@ -205,7 +208,10 @@ def performance():
     for market, config in MARKETS.items():
         logs = _logs(market)
         reports[market] = performance_report(
-            logs, sources[market], _dynamic_universe(logs, config))
+            logs, sources[market], config.get("candidate_universe", config["watchlist"]),
+            valuation_snapshots=load_valuation_snapshots(config["db"]),
+            trades=_trades(market, 10000),
+        )
     return jsonify(reports)
 
 
@@ -312,8 +318,8 @@ canvas { max-height:220px; }
 <div class="card full" style="margin-top:16px">
   <h2>⚖️ 收益风险 Evals
     <button id="perfBtn" onclick="loadPerformance()">计算收益风险</button></h2>
-  <div id="perfBox" class="muted">累计收益、等权基准、波动、回撤、Sharpe、Sortino 与换手率</div>
-  <div class="grid" style="margin-top:14px"><div><h2>组合 vs 等权基准</h2><canvas id="perfCurve"></canvas></div>
+  <div id="perfBox" class="muted">累计收益、时变候选基准、波动、回撤、Sharpe、Sortino 与换手率</div>
+  <div class="grid" style="margin-top:14px"><div><h2>组合 vs 时变候选基准</h2><canvas id="perfCurve"></canvas></div>
   <div><h2>组合回撤</h2><canvas id="drawdownCurve"></canvas></div></div>
 </div>
 
@@ -473,7 +479,7 @@ async function loadPerformance() {
   const btn = document.getElementById("perfBtn");
   btn.disabled = true; btn.textContent = "计算中…";
   const data = await (await fetch("/api/performance")).json();
-  let html = "<table><thead><tr><th>市场</th><th>累计收益</th><th>等权基准</th><th>超额</th><th>年化波动</th><th>最大回撤</th><th>Sharpe</th><th>Sortino</th><th>换手</th></tr></thead><tbody>";
+  let html = "<table><thead><tr><th>市场</th><th>累计收益</th><th>时变候选基准</th><th>超额</th><th>年化波动</th><th>最大回撤</th><th>Sharpe</th><th>Sortino</th><th>换手</th></tr></thead><tbody>";
   for (const mkt of ["cn", "us"]) {
     const r = data[mkt], p = r.portfolio, b = r.benchmark;
     html += `<tr><td>${mkt === "cn" ? "A股" : "美股"}<div class=muted>${esc(r.data_quality.message)}</div></td>` +
@@ -494,9 +500,9 @@ async function loadPerformance() {
   perfCharts.returns = new Chart(document.getElementById("perfCurve"), {
     type:"line", data:{labels, datasets:[
       {label:"A股组合",data:values(data.cn.portfolio_curve,"index"),borderColor:"#4f8ef7",tension:.25},
-      {label:"A股等权",data:values(data.cn.benchmark_curve,"index"),borderColor:"#89b4fa",borderDash:[5,4],tension:.25},
+      {label:"A股时变候选",data:values(data.cn.benchmark_curve,"index"),borderColor:"#89b4fa",borderDash:[5,4],tension:.25},
       {label:"美股组合",data:values(data.us.portfolio_curve,"index"),borderColor:"#2ecc71",tension:.25},
-      {label:"美股等权",data:values(data.us.benchmark_curve,"index"),borderColor:"#95e6b7",borderDash:[5,4],tension:.25}
+      {label:"美股时变候选",data:values(data.us.benchmark_curve,"index"),borderColor:"#95e6b7",borderDash:[5,4],tension:.25}
     ]}, options:{plugins:{legend:{labels:{color:"#8b93a7"}}},scales:{x:{ticks:{color:"#8b93a7"},grid:{color:"#262b38"}},y:{ticks:{color:"#8b93a7"},grid:{color:"#262b38"}}}}
   });
   perfCharts.drawdown = new Chart(document.getElementById("drawdownCurve"), {

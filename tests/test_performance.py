@@ -1,9 +1,13 @@
 import unittest
+import sqlite3
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
-from evals.performance import (equal_weight_curve, indexed_curve,
-                               performance_metrics, performance_report)
+from evals.performance import (equal_weight_curve, indexed_curve, load_valuation_snapshots,
+                               performance_metrics, performance_report,
+                               time_varying_equal_weight_curve)
 
 
 class PerformanceTests(unittest.TestCase):
@@ -39,6 +43,35 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(curve[1]["period_change"], 10.0)
         self.assertEqual(curve[2]["period_return_pct"], -20.0)
         self.assertEqual(curve[2]["drawdown_pct"], -20.0)
+
+    def test_future_constituent_cannot_change_earlier_benchmark_return(self):
+        frames = {
+            "A": pd.DataFrame({"date": ["2026-01-01", "2026-01-02", "2026-01-03"],
+                               "close": [100, 110, 110]}),
+            "FUTURE": pd.DataFrame({"date": ["2026-01-01", "2026-01-02", "2026-01-03"],
+                                    "close": [1, 1000, 1000]}),
+        }
+        schedule = [
+            {"date": "2026-01-01", "symbols": ["A"]},
+            {"date": "2026-01-02", "symbols": ["A", "FUTURE"]},
+            {"date": "2026-01-03", "symbols": ["A", "FUTURE"]},
+        ]
+        curve = time_varying_equal_weight_curve(frames, schedule)
+        self.assertAlmostEqual(curve[1]["total"], 1.1)
+        self.assertAlmostEqual(curve[2]["total"], 1.1)
+
+    def test_loads_durable_valuation_snapshots(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "account.db"
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE valuation_snapshots (snapshot_date TEXT, run_id TEXT, cash REAL, total_assets REAL, positions_json TEXT, prices_json TEXT, data_sources_json TEXT)")
+            conn.execute("INSERT INTO valuation_snapshots VALUES (?,?,?,?,?,?,?)",
+                         ("2026-01-02", "run", 50, 110, "[]", '{\"A\":110}', '[\"mock\"]'))
+            conn.commit()
+            conn.close()
+            rows = load_valuation_snapshots(path)
+        self.assertEqual(rows[0]["total_assets"], 110)
+        self.assertEqual(rows[0]["prices"]["A"], 110)
 
     def test_report_keeps_synthetic_benchmark_same_source(self):
         frame = pd.DataFrame({"date": ["2026-01-01", "2026-01-02"], "close": [100, 105]})

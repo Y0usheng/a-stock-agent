@@ -51,7 +51,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     def _snapshot(market):
         return [{"symbol": item["symbol"], "name": item["name"], "close": 100.0,
                  "above_ma20": True, "macd_dif": 1.0, "macd_dea": 0.0,
-                 "rsi14": 50.0}
+                 "rsi14": 50.0, "volume": 1_000_000}
                 for item in MARKETS[market]["watchlist"]]
 
     async def test_mock_covers_watchlist_when_budget_is_below_one_lot(self):
@@ -102,7 +102,9 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
         host = Host()
         errors = await execute_sdk_plan(host, result, {item["symbol"]: 123.0
-                                                       for item in MARKETS["us"]["watchlist"]})
+                                                       for item in MARKETS["us"]["watchlist"]},
+                                        {item["symbol"]: 1_000_000
+                                         for item in MARKETS["us"]["watchlist"]})
         self.assertEqual(host.args["price"], 123.0)
         self.assertEqual(result["decisions"][0]["action"], "HOLD")
         self.assertEqual(len(errors), 1)

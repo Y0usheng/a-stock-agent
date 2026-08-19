@@ -63,7 +63,7 @@ class AccountRulesTests(unittest.TestCase):
         return account.buy(
             symbol, name, shares, price, reason, run_id,
             order_id or f"{run_id}:order-{self.order_number}",
-            trade_date or self.trade_date, current_prices,
+            trade_date or self.trade_date, 1_000_000, current_prices,
         )
 
     def _sell(self, symbol, shares, price, reason, *, run_id="test-run",
@@ -72,7 +72,7 @@ class AccountRulesTests(unittest.TestCase):
         return account.sell(
             symbol, shares, price, reason, run_id,
             order_id or f"{run_id}:order-{self.order_number}",
-            trade_date or self.trade_date,
+            trade_date or self.trade_date, 1_000_000,
         )
 
     def tearDown(self):
@@ -88,7 +88,7 @@ class AccountRulesTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         position = account.get_account()["positions"][0]
         self.assertEqual(position["name"], "贵州茅台")
-        self.assertAlmostEqual(position["avg_cost"], 10.05)
+        self.assertAlmostEqual(position["avg_cost"], 10.055)
 
     def test_market_value_position_limit(self):
         result = self._buy("600519", "贵州茅台", 3100, 100, "too large",
@@ -130,6 +130,32 @@ class AccountRulesTests(unittest.TestCase):
         )
         self.assertFalse(blocked["ok"])
         self.assertIn("每日批准名单", blocked["error"])
+
+    def test_slippage_and_liquidity_are_applied(self):
+        filled = self._buy("600519", "贵州茅台", 100, 100, "test")
+        self.assertEqual(filled["market_price"], 100)
+        self.assertEqual(filled["price"], 100.05)
+        self.assertEqual(filled["slippage_cost"], 5.0)
+        blocked = account.buy(
+            "300750", "宁德时代", 1000, 10, "illiquid", "test-run",
+            "illiquid-order", self.trade_date, 1000, {"300750": 10},
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertIn("流动性限制", blocked["error"])
+
+    def test_valuation_snapshot_is_durable_and_idempotent(self):
+        self._buy("600519", "贵州茅台", 100, 10, "test")
+        first = account.record_valuation_snapshot(
+            "test-run", self.trade_date, {"600519": 11}, ["test-source"]
+        )
+        second = account.record_valuation_snapshot(
+            "test-run", self.trade_date, {"600519": 12}, ["test-source"]
+        )
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        snapshots = account.get_valuation_snapshots()
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["prices"]["600519"], 12)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,8 @@ def _assert_live_data(snapshot: list[dict], news_screen: dict) -> None:
     if any(not source or any(tag in source for tag in ("mock", "offline", "synthetic", "模拟", "离线"))
            for source in sources):
         raise RuntimeError("实时模式检测到模拟、离线或未知行情数据，已停止交易")
+    if any(not isinstance(item.get("volume"), int) or item["volume"] <= 0 for item in snapshot):
+        raise RuntimeError("实时模式检测到无效成交量或停牌标的，已停止交易")
 
 
 def _order_id(run_id: str, symbol: str) -> str:
@@ -156,11 +158,15 @@ async def run_mock(host: McpHost, memory: dict, snapshot: list[dict] | None = No
             r = await host.call("sell", {"symbol": sym, "shares": held[sym]["shares"],
                                          "price": px, "reason": sell_reason,
                                          "run_id": run_id, "order_id": _order_id(run_id, sym),
-                                         "trade_date": trade_date})
+                                         "trade_date": trade_date,
+                                         "daily_volume": int(s["volume"])})
             executed = bool(r.get("ok"))
             decisions.append({"symbol": sym, "name": s["name"],
                               "action": "SELL" if executed else "HOLD",
-                              "shares": held[sym]["shares"] if executed else 0, "price": px,
+                              "shares": held[sym]["shares"] if executed else 0,
+                              "price": r.get("price", px) if executed else px,
+                              "market_price": px,
+                              "slippage_cost": r.get("slippage_cost", 0),
                               "reason": r.get("error") or sell_reason})
         elif sym not in held and bullish and news_confirmed:
             budget = min(cash * 0.3, total * (MAX_POSITION_PCT - 0.02))
@@ -171,13 +177,17 @@ async def run_mock(host: McpHost, memory: dict, snapshot: list[dict] | None = No
                                             "reason": f"技术趋势确认且新闻事件分={news_score}",
                                             "current_prices": prices, "run_id": run_id,
                                             "order_id": _order_id(run_id, sym),
-                                            "trade_date": trade_date})
+                                            "trade_date": trade_date,
+                                            "daily_volume": int(s["volume"])})
                 if r.get("ok"):
                     cash = r["cash_after"]
                 executed = bool(r.get("ok"))
                 decisions.append({"symbol": sym, "name": s["name"],
                                   "action": "BUY" if executed else "HOLD",
-                                  "shares": shares if executed else 0, "price": px,
+                                  "shares": shares if executed else 0,
+                                  "price": r.get("price", px) if executed else px,
+                                  "market_price": px,
+                                  "slippage_cost": r.get("slippage_cost", 0),
                                   "reason": r.get("error") or
                                             f"站上MA20+MACD金叉且新闻事件分={news_score}"})
             else:
@@ -208,6 +218,7 @@ async def run_mock(host: McpHost, memory: dict, snapshot: list[dict] | None = No
 
 
 async def execute_sdk_plan(host: McpHost, result: dict, prices: dict[str, float],
+                           volumes: dict[str, int],
                            run_id: str = "", trade_date: str = "") -> list[dict]:
     """结构验证后由宿主统一执行 SDK 计划；失败订单降级为 HOLD 并保留原因。"""
     errors = []
@@ -224,6 +235,7 @@ async def execute_sdk_plan(host: McpHost, result: dict, prices: dict[str, float]
                 "reason": decision["reason"], "current_prices": prices,
                 "run_id": run_id, "order_id": _order_id(run_id, decision["symbol"]),
                 "trade_date": trade_date,
+                "daily_volume": volumes[decision["symbol"]],
             })
         else:
             response = await host.call("sell", {
@@ -231,6 +243,7 @@ async def execute_sdk_plan(host: McpHost, result: dict, prices: dict[str, float]
                 "price": decision["price"], "reason": decision["reason"],
                 "run_id": run_id, "order_id": _order_id(run_id, decision["symbol"]),
                 "trade_date": trade_date,
+                "daily_volume": volumes[decision["symbol"]],
             })
         if not response.get("ok"):
             errors.append({"symbol": decision["symbol"], "action": action,
@@ -238,6 +251,10 @@ async def execute_sdk_plan(host: McpHost, result: dict, prices: dict[str, float]
             decision["action"] = "HOLD"
             decision["shares"] = 0
             decision["reason"] = f"计划未执行:{response.get('error', '未知账户错误')}"
+        else:
+            decision["market_price"] = float(prices[decision["symbol"]])
+            decision["price"] = float(response["price"])
+            decision["slippage_cost"] = float(response.get("slippage_cost") or 0)
     return errors
 
 
@@ -271,6 +288,7 @@ async def run_market(
         snapshot = await host.call("candidate_snapshot", {"symbols": host.active_symbols})
         _assert_live_data(snapshot, news_screen)
         prices = {s["symbol"]: s["close"] for s in snapshot}
+        volumes = {s["symbol"]: int(s["volume"]) for s in snapshot}
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         log_file = LOG_DIR / f"{as_of_date}.{market}.json"
         if log_file.exists() and not force:
@@ -310,19 +328,25 @@ async def run_market(
                                  expected_symbols=expected_symbols)
         if mode == "openai_agents_sdk":
             result["execution_errors"] = await execute_sdk_plan(
-                host, result, prices, run_id, as_of_date
+                host, result, prices, volumes, run_id, as_of_date
             )
             validate_decision_result(result, market, require_roles=True,
                                      expected_symbols=expected_symbols)
         run_trades = await host.call("get_trades", {"limit": 100, "run_id": run_id})
         result["execution_reconciliation"] = reconcile_executions(result, run_trades)
         account = await host.call("get_account", {"current_prices": prices})
+        data_sources = sorted({s.get("data_source") for s in snapshot if s.get("data_source")})
+        valuation_snapshot = await host.call("record_valuation_snapshot", {
+            "run_id": run_id, "snapshot_date": as_of_date,
+            "current_prices": prices, "data_sources": data_sources,
+        })
+        if not valuation_snapshot.get("ok"):
+            raise RuntimeError(f"每日资产快照写入失败:{valuation_snapshot.get('error', '未知错误')}")
         result["date"] = as_of_date  # 兼容已有日志和评分器
         result["as_of_date"] = as_of_date
         result["generated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         result["market"] = market
         result["mode"] = mode
-        data_sources = sorted({s.get("data_source") for s in snapshot if s.get("data_source")})
         result["data_sources"] = data_sources
         result["news_screen"] = news_screen
         result["active_symbols"] = host.active_symbols
@@ -331,6 +355,7 @@ async def run_market(
         result["strategy_version"] = STRATEGY_VERSION
         result["memory"] = memory
         result["account_after"] = account
+        result["valuation_snapshot"] = valuation_snapshot
         log_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
         print(f"--- {result['date']} {m['name']}决策总结 ---")

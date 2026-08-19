@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-- **阶段2/3 基线已完成**:OpenAI Agents SDK 技术/基本面/风控角色、选择性历史记忆、方向及收益风险 Evals 均已接通。
+- **可靠性第二阶段已完成**:无未来泄漏时变基准、SQLite 每日估值、成交成本模型和90日新闻 A/B 回测已接通。
 - 已完成新闻 MCP、动态候选池、多角色只读分析和双市场离线端到端验收。
 - 当前没有真实资金或券商接口；所有买卖仅写入本地 SQLite 模拟账本。
 - 未使用有效 API key 执行收费的 Agent SDK 推理；该路径已完成配置、导入、权限和结构测试。
@@ -29,7 +29,8 @@
 └────────┘ └────────┘ └─────────┘ └────────┘
   决策+角色结论+记忆ID → logs/decisions/日期.市场.json
                           ├→ evals/score.py 方向评分
-                          └→ evals/report.py 收益风险/等权基准
+                          ├→ evals/report.py 收益风险/时变候选基准
+                          └→ evals/backtest.py 60–120日滚动新闻A/B
 ```
 
 同一份 `account_server.py` 通过环境变量 `ASTOCK_MARKET` 加载不同市场规则;
@@ -43,6 +44,8 @@
 | 最小单位 | 一手100股 | 1股 |
 | 回转交易 | T+1 | T+0 |
 | 费用 | 佣金万2.5(最低5元)+卖出印花税万5 | 零佣金 |
+| 模拟滑点 | 单边5 bps | 单边3 bps |
+| 单笔流动性 | 不超过当日成交量5% | 不超过当日成交量2% |
 | 行情源 | akshare | yfinance |
 | 新闻源 | 巨潮资讯公告 + 东方财富新闻 | yfinance/Yahoo；可选 Alpha Vantage |
 
@@ -78,8 +81,11 @@ set DEEPSEEK_API_KEY=sk-...
 # 几个交易日后,给预测打分(分市场输出命中率)
 .venv\Scripts\python evals/score.py
 
-# 组合收益、等权基准、波动、最大回撤、Sharpe、Sortino、换手率
+# 组合收益、无未来泄漏时变候选基准、波动、最大回撤、Sharpe、Sortino、换手率
 .venv\Scripts\python evals/report.py
+
+# 60–120交易日滚动回测 + 新闻开/关 A/B（默认90日离线可复现）
+.venv\Scripts\python evals/backtest.py --market both --window 90
 
 # Web 仪表盘(推荐):浏览器查看资产曲线/持仓/决策/命中率
 .venv\Scripts\python dashboard/app.py
@@ -91,6 +97,8 @@ set DEEPSEEK_API_KEY=sk-...
 - 交易使用行情截面日而非电脑当天日期；账户会校验本轮 `run_id` 和每日批准股票名单
 - 同一行情日默认只运行一次；`--force` 仅在该轮没有成交时允许覆盖分析日志，账户已有成交时仍会安全跳过
 - 每笔订单都有唯一幂等键，重复请求返回原成交结果，不会再次扣款或增减持仓
+- 买卖价加入保守单边滑点，并限制单笔成交量参与率；成交量无效/停牌时拒绝订单
+- 每日总资产、现金、持仓、估值价和数据源写入 SQLite `valuation_snapshots`，JSON 日志不再是唯一资产历史
 - 账户:`data/account_cn.db` / `data/account_us.db`(删除即重置资金)
 - 日志:`logs/decisions/YYYY-MM-DD.{cn,us}.json`;`logs/demo/` 为沙盒演示结果
 
@@ -111,9 +119,16 @@ set DEEPSEEK_API_KEY=sk-...
 
 ### 收益风险 Evals
 
-方向命中率不等于赚钱，更不等于风险可接受。新增累计收益、股票池等权基准、超额收益、年化波动、
+方向命中率不等于赚钱，更不等于风险可接受。新增累计收益、时变候选等权基准、超额收益、年化波动、
 最大回撤、Sharpe、Sortino、交易次数和换手率。少于20个收益观察时不输出误导性的年化收益；
-真实和模拟行情严格同源评估。
+真实和模拟行情严格同源评估。每个收益区间只使用区间起点已经入选的候选股，未来新闻才入选的股票
+不会被提前放进历史基准。
+
+### 滚动回测与新闻 A/B
+
+`evals/backtest.py` 支持60–120交易日窗口，信号只读取当日及以前数据，统一在下一交易日开盘成交，
+并计入滑点、佣金、印花税和成交量上限。同一份行情分别开启/关闭新闻门控，输出收益差、回撤和成交数。
+默认新闻是明确标记的可复现合成事件，只能验证工程链路和相对策略，不能当作真实历史新闻结论。
 
 ### 新闻 MCP 与动态候选池
 
@@ -129,9 +144,9 @@ yfinance/Yahoo，配置 `ALPHAVANTAGE_API_KEY` 后叠加 Alpha Vantage NEWS_SENT
 .venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-测试覆盖角色级 Provider 路由、多角色权限隔离、Agent SDK 只读工具、记忆截止日、防未来泄漏、收益风险公式、等权基准、
+测试覆盖角色级 Provider 路由、多角色权限隔离、Agent SDK 只读工具、记忆截止日、防未来泄漏、收益风险公式、时变基准、
 决策与账本成交核对、宿主锁定成交价、每日幂等、离线行情可复现、预测到期判定、数据源隔离、
-订单校验、仓位上限和 A 股 T+1。
+订单校验、仓位上限、A 股 T+1、滑点、流动性、持久化估值、次日开盘回测和新闻 A/B。
 
 ## 可选环境变量
 
@@ -162,9 +177,10 @@ Windows 任务计划程序建两个任务:
 - [x] **阶段1 MCP**:数据/账户 MCP server + MCP client 决策循环,双市场参数化
 - [x] **阶段1.1 稳定化**:可复现行情、交易日对齐、账户风控、可靠评分、自动化测试
 - [x] **阶段2 OpenAI Agents SDK 混合 Provider**:GPT/DeepSeek 角色路由、只读 agents-as-tools、宿主执行隔离
-- [x] **阶段3 上下文工程 + Evals 基线**:选择性历史记忆、收益风险和等权基准 ← 当前
+- [x] **阶段3 上下文工程 + Evals 基线**:选择性历史记忆、收益风险和等权基准
 - [x] **阶段3.1 新闻动态候选池**:新闻 MCP、受控候选宇宙、新闻/技术共振与防未来泄漏
-- [ ] **阶段3.1 实验平台**:批量历史回放、prompt/模型版本 A/B、置信度校准
+- [x] **阶段3.2 可信评估**:时变候选基准、每日估值快照、成交成本、60–120日新闻A/B ← 当前
+- [ ] **阶段3.3 实验平台**:真实历史新闻集、prompt/模型版本 A/B、置信度校准
 - [ ] **阶段4 LangGraph**:图编排重写(并行分析→风控分支→人工确认),与 Agent SDK 对比
 
 ## 关键学习点(读代码时注意)
@@ -176,4 +192,5 @@ Windows 任务计划程序建两个任务:
 - `evals/score.py`:预测 vs 实际的评分闭环——改 prompt 后分数变化就是迭代依据
 - `agent/sdk_runner.py`:角色级 Provider 路由、agents-as-tools、只读工具白名单和本地 JSON 校验
 - `agent/memory.py`:只选截止日前的紧凑历史,每次注入均可用 `memory_id` 追溯
-- `evals/performance.py`:组合与等权基准的风险调整收益闭环
+- `evals/performance.py`:组合与无未来泄漏时变基准的风险调整收益闭环
+- `evals/backtest.py`:收盘信号/次日开盘成交的滚动回测与新闻 A/B

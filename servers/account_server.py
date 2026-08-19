@@ -51,16 +51,30 @@ def _db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT CURRENT_TIMESTAMP,
         trade_date TEXT, symbol TEXT, name TEXT, action TEXT,
         shares INTEGER, price REAL, fee REAL, reason TEXT,
-        run_id TEXT, order_id TEXT);
+        run_id TEXT, order_id TEXT, market_price REAL,
+        slippage_cost REAL, daily_volume INTEGER);
     CREATE TABLE IF NOT EXISTS run_authorizations (
         run_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL,
         approved_symbols TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS valuation_snapshots (
+        snapshot_date TEXT NOT NULL, run_id TEXT NOT NULL,
+        cash REAL NOT NULL, total_assets REAL NOT NULL,
+        positions_json TEXT NOT NULL, prices_json TEXT NOT NULL,
+        data_sources_json TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(snapshot_date, run_id));
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
     if "run_id" not in columns:
         conn.execute("ALTER TABLE trades ADD COLUMN run_id TEXT")
     if "order_id" not in columns:
         conn.execute("ALTER TABLE trades ADD COLUMN order_id TEXT")
+    if "market_price" not in columns:
+        conn.execute("ALTER TABLE trades ADD COLUMN market_price REAL")
+    if "slippage_cost" not in columns:
+        conn.execute("ALTER TABLE trades ADD COLUMN slippage_cost REAL")
+    if "daily_volume" not in columns:
+        conn.execute("ALTER TABLE trades ADD COLUMN daily_volume INTEGER")
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_trades_order_id "
         "ON trades(order_id) WHERE order_id IS NOT NULL AND order_id <> ''"
@@ -84,6 +98,23 @@ def _fee(amount: float, is_sell: bool) -> float:
     if is_sell:
         fee += amount * M["stamp_tax_rate"]
     return round(fee, 2)
+
+
+def _execution_price(market_price: float, is_sell: bool) -> float:
+    """对模拟盘快照价施加保守单边滑点；买入更贵、卖出更便宜。"""
+    direction = -1 if is_sell else 1
+    price = market_price * (1 + direction * float(M.get("slippage_bps", 0)) / 10_000)
+    return round(price, 4)
+
+
+def _liquidity_error(shares: int, daily_volume: int) -> str | None:
+    if isinstance(daily_volume, bool) or not isinstance(daily_volume, int) or daily_volume <= 0:
+        return "当日成交量无效或股票停牌，拒绝成交"
+    maximum = max(int(daily_volume * M.get("max_volume_participation_pct", 0.05) / LOT) * LOT, 0)
+    if maximum < LOT or shares > maximum:
+        return (f"超过流动性限制:请求 {shares} 股,当日成交量 {daily_volume},"
+                f"单笔最多 {maximum} 股")
+    return None
 
 
 def _price_error(price: float) -> str | None:
@@ -140,7 +171,7 @@ def _order_context(conn, run_id: str, order_id: str, trade_date: str,
             and existing["symbol"] == symbol
             and existing["action"] == action
             and existing["shares"] == shares
-            and abs(float(existing["price"]) - price) < 1e-8
+            and abs(float(existing["market_price"] or existing["price"]) - price) < 1e-8
         )
         if not same_order:
             return "order_id 已被不同订单使用，拒绝重复执行", None
@@ -221,6 +252,7 @@ def get_account(current_prices: dict[str, float] | None = None) -> dict:
 @mcp.tool()
 def buy(symbol: str, name: str, shares: int, price: float, reason: str,
         run_id: str, order_id: str, trade_date: str,
+        daily_volume: int,
         current_prices: dict[str, float] | None = None) -> dict:
     """买入股票。A股股数须为100的整数倍,美股可买1股。
     受限制:仅限股票池、现金不足或单股仓位超过总资产30%会被拒绝。
@@ -232,11 +264,14 @@ def buy(symbol: str, name: str, shares: int, price: float, reason: str,
         return {"ok": False, "error": error}
     if error := _price_error(price):
         return {"ok": False, "error": error}
-    price = float(price)
+    if error := _liquidity_error(shares, daily_volume):
+        return {"ok": False, "error": error}
+    market_price = float(price)
+    price = _execution_price(market_price, is_sell=False)
     name = WATCHLIST[symbol]  # 账户统一使用配置中的规范名称
     conn = _db()
     error, existing = _order_context(
-        conn, run_id, order_id, trade_date, symbol, "BUY", shares, price
+        conn, run_id, order_id, trade_date, symbol, "BUY", shares, market_price
     )
     if error:
         conn.close()
@@ -245,7 +280,10 @@ def buy(symbol: str, name: str, shares: int, price: float, reason: str,
         cash = _cash(conn)
         conn.close()
         return {"ok": True, "duplicate": True, "symbol": symbol, "shares": shares,
-                "price": price, "fee": existing["fee"], "cash_after": round(cash, 2)}
+                "market_price": existing["market_price"] or market_price,
+                "price": existing["price"], "fee": existing["fee"],
+                "slippage_cost": existing["slippage_cost"] or 0,
+                "cash_after": round(cash, 2)}
     amount = shares * price
     fee = _fee(amount, is_sell=False)
     cash = _cash(conn)
@@ -255,10 +293,10 @@ def buy(symbol: str, name: str, shares: int, price: float, reason: str,
     row = conn.execute("SELECT shares, avg_cost FROM positions WHERE symbol=?", (symbol,)).fetchone()
     held_cost = (row["shares"] * row["avg_cost"]) if row else 0.0
     prices = dict(current_prices or {})
-    prices[symbol] = price
+    prices[symbol] = market_price
     total_est = _estimated_total_assets(conn, cash, prices)
     held_shares = row["shares"] if row else 0
-    position_after = (held_shares + shares) * price
+    position_after = (held_shares + shares) * market_price
     if position_after > total_est * MAX_POSITION_PCT:
         conn.close()
         return {"ok": False, "error": f"超过单股最大仓位 {MAX_POSITION_PCT:.0%},买入后市值 {position_after:.0f},总资产估算 {total_est:.0f}"}
@@ -271,18 +309,21 @@ def buy(symbol: str, name: str, shares: int, price: float, reason: str,
         conn.execute("INSERT INTO positions VALUES (?,?,?,?,?)",
                      (symbol, name, shares, (amount + fee) / shares, trade_date))
     _set_cash(conn, cash - amount - fee)
-    conn.execute("INSERT INTO trades (trade_date,symbol,name,action,shares,price,fee,reason,run_id,order_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                 (trade_date, symbol, name, "BUY", shares, price, fee, reason, run_id, order_id))
+    slippage_cost = round((price - market_price) * shares, 2)
+    conn.execute("INSERT INTO trades (trade_date,symbol,name,action,shares,price,fee,reason,run_id,order_id,market_price,slippage_cost,daily_volume) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (trade_date, symbol, name, "BUY", shares, price, fee, reason, run_id,
+                  order_id, market_price, slippage_cost, daily_volume))
     conn.commit()
     new_cash = _cash(conn)
     conn.close()
-    return {"ok": True, "symbol": symbol, "shares": shares, "price": price,
-            "fee": fee, "cash_after": round(new_cash, 2)}
+    return {"ok": True, "symbol": symbol, "shares": shares,
+            "market_price": market_price, "price": price, "fee": fee,
+            "slippage_cost": slippage_cost, "cash_after": round(new_cash, 2)}
 
 
 @mcp.tool()
 def sell(symbol: str, shares: int, price: float, reason: str,
-         run_id: str, order_id: str, trade_date: str) -> dict:
+         run_id: str, order_id: str, trade_date: str, daily_volume: int) -> dict:
     """卖出股票。A股遵守 T+1(当日买入不可当日卖出),美股无此限制。
     reason 记录卖出理由供复盘"""
     symbol = symbol.strip().upper()
@@ -290,10 +331,13 @@ def sell(symbol: str, shares: int, price: float, reason: str,
         return {"ok": False, "error": error}
     if error := _price_error(price):
         return {"ok": False, "error": error}
-    price = float(price)
+    if error := _liquidity_error(shares, daily_volume):
+        return {"ok": False, "error": error}
+    market_price = float(price)
+    price = _execution_price(market_price, is_sell=True)
     conn = _db()
     error, existing = _order_context(
-        conn, run_id, order_id, trade_date, symbol, "SELL", shares, price
+        conn, run_id, order_id, trade_date, symbol, "SELL", shares, market_price
     )
     if error:
         conn.close()
@@ -302,7 +346,10 @@ def sell(symbol: str, shares: int, price: float, reason: str,
         cash = _cash(conn)
         conn.close()
         return {"ok": True, "duplicate": True, "symbol": symbol, "shares": shares,
-                "price": price, "fee": existing["fee"], "cash_after": round(cash, 2)}
+                "market_price": existing["market_price"] or market_price,
+                "price": existing["price"], "fee": existing["fee"],
+                "slippage_cost": existing["slippage_cost"] or 0,
+                "cash_after": round(cash, 2)}
     row = conn.execute("SELECT * FROM positions WHERE symbol=?", (symbol,)).fetchone()
     if not row or row["shares"] < shares:
         conn.close()
@@ -324,13 +371,77 @@ def sell(symbol: str, shares: int, price: float, reason: str,
         conn.execute("UPDATE positions SET shares=? WHERE symbol=?", (remaining, symbol))
     _set_cash(conn, _cash(conn) + amount - fee)
     pnl = (price - row["avg_cost"]) * shares - fee
-    conn.execute("INSERT INTO trades (trade_date,symbol,name,action,shares,price,fee,reason,run_id,order_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                 (trade_date, symbol, row["name"], "SELL", shares, price, fee, reason, run_id, order_id))
+    slippage_cost = round((market_price - price) * shares, 2)
+    conn.execute("INSERT INTO trades (trade_date,symbol,name,action,shares,price,fee,reason,run_id,order_id,market_price,slippage_cost,daily_volume) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (trade_date, symbol, row["name"], "SELL", shares, price, fee, reason,
+                  run_id, order_id, market_price, slippage_cost, daily_volume))
     conn.commit()
     new_cash = _cash(conn)
     conn.close()
-    return {"ok": True, "symbol": symbol, "shares": shares, "price": price,
-            "fee": fee, "realized_pnl": round(pnl, 2), "cash_after": round(new_cash, 2)}
+    return {"ok": True, "symbol": symbol, "shares": shares,
+            "market_price": market_price, "price": price, "fee": fee,
+            "slippage_cost": slippage_cost,
+            "realized_pnl": round(pnl, 2), "cash_after": round(new_cash, 2)}
+
+
+@mcp.tool()
+def record_valuation_snapshot(run_id: str, snapshot_date: str,
+                              current_prices: dict[str, float],
+                              data_sources: list[str]) -> dict:
+    """持久化每日收盘估值。必须对应已授权 run_id，且所有持仓均有有效快照价。"""
+    if error := _date_error(snapshot_date):
+        return {"ok": False, "error": error}
+    conn = _db()
+    authorization = conn.execute(
+        "SELECT trade_date FROM run_authorizations WHERE run_id=?", (run_id,)
+    ).fetchone()
+    if authorization is None or authorization["trade_date"] != snapshot_date:
+        conn.close()
+        return {"ok": False, "error": "估值快照与运行授权不一致"}
+    positions = [dict(row) for row in conn.execute(
+        "SELECT * FROM positions WHERE shares>0 ORDER BY symbol"
+    )]
+    normalized_prices = {}
+    for item in positions:
+        price = current_prices.get(item["symbol"])
+        if error := _price_error(price):
+            conn.close()
+            return {"ok": False, "error": f"{item['symbol']} 缺少有效估值价:{error}"}
+        normalized_prices[item["symbol"]] = float(price)
+        item["market_price"] = float(price)
+        item["market_value"] = round(item["shares"] * float(price), 2)
+    cash = _cash(conn)
+    total_assets = round(cash + sum(item["market_value"] for item in positions), 2)
+    sources = sorted(set(str(source) for source in data_sources if source))
+    conn.execute(
+        "INSERT INTO valuation_snapshots(snapshot_date,run_id,cash,total_assets,positions_json,prices_json,data_sources_json) "
+        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(snapshot_date,run_id) DO UPDATE SET "
+        "cash=excluded.cash,total_assets=excluded.total_assets,positions_json=excluded.positions_json,"
+        "prices_json=excluded.prices_json,data_sources_json=excluded.data_sources_json,created_at=CURRENT_TIMESTAMP",
+        (snapshot_date, run_id, cash, total_assets,
+         json.dumps(positions, ensure_ascii=False, separators=(",", ":")),
+         json.dumps(normalized_prices, ensure_ascii=False, separators=(",", ":")),
+         json.dumps(sources, ensure_ascii=False, separators=(",", ":"))),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "snapshot_date": snapshot_date, "run_id": run_id,
+            "cash": round(cash, 2), "total_assets": total_assets,
+            "positions": positions, "data_sources": sources}
+
+
+@mcp.tool()
+def get_valuation_snapshots(limit: int = 200) -> list[dict]:
+    """查询持久化每日估值快照，供收益曲线与 Evals 使用。"""
+    conn = _db()
+    rows = [dict(row) for row in conn.execute(
+        "SELECT * FROM valuation_snapshots ORDER BY snapshot_date DESC LIMIT ?", (limit,)
+    )]
+    conn.close()
+    for row in rows:
+        for key in ("positions_json", "prices_json", "data_sources_json"):
+            row[key.removesuffix("_json")] = json.loads(row.pop(key))
+    return rows
 
 
 @mcp.tool()

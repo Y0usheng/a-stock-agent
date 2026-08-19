@@ -41,6 +41,8 @@ MARKETS = {
         "commission_rate": 0.00025,
         "commission_min": 5.0,
         "stamp_tax_rate": 0.0005,  # 卖出印花税
+        "slippage_bps": 5.0,       # 模拟成交相对快照价的单边滑点
+        "max_volume_participation_pct": 0.05,  # 单笔最多占当日成交量5%
         "db": DATA_DIR / "account_cn.db",
         "market_server": ROOT / "servers" / "market_server.py",
         "news_server": ROOT / "servers" / "news_server.py",
@@ -77,6 +79,8 @@ MARKETS = {
         "commission_rate": 0.0,   # 主流券商零佣金
         "commission_min": 0.0,
         "stamp_tax_rate": 0.0,
+        "slippage_bps": 3.0,
+        "max_volume_participation_pct": 0.02,
         "db": DATA_DIR / "account_us.db",
         "market_server": ROOT / "servers" / "us_market_server.py",
         "news_server": ROOT / "servers" / "news_server.py",

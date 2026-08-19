@@ -121,10 +121,13 @@ def get_indicators(symbol: str) -> dict:
     ema26 = close.ewm(span=26).mean()
     dif = ema12 - ema26
     dea = dif.ewm(span=9).mean()
+    previous_close = float(close.iloc[-2])
     return {
         "symbol": symbol,
         "date": str(df["date"].iloc[-1]),
         "close": float(close.iloc[-1]),
+        "change_pct": round((float(close.iloc[-1]) / previous_close - 1) * 100, 3),
+        "volume": int(df["volume"].iloc[-1]),
         "ma5": round(float(ma5), 2), "ma20": round(float(ma20), 2),
         "ma60": round(float(ma60), 2),
         "rsi14": round(float(rsi), 1),
