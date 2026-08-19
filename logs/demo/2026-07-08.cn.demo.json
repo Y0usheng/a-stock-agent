@@ -1,0 +1,14 @@
+{
+  "_note": "沙盒演示运行(离线模拟行情)。正式日志由 run_daily.py 生成于 logs/decisions/",
+  "summary": "A股规则策略(mock)执行完毕",
+  "decisions": [
+    {"symbol": "600519", "name": "贵州茅台", "action": "HOLD", "shares": 0, "price": 1457.04, "reason": "无信号"},
+    {"symbol": "300750", "name": "宁德时代", "action": "BUY", "shares": 800, "price": 319.5, "reason": "站上MA20+MACD金叉买入"},
+    {"symbol": "600036", "name": "招商银行", "action": "BUY", "shares": 4800, "price": 46.38, "reason": "站上MA20+MACD金叉买入"},
+    {"symbol": "002594", "name": "比亚迪", "action": "BUY", "shares": 400, "price": 361.09, "reason": "站上MA20+MACD金叉买入"},
+    {"symbol": "601899", "name": "紫金矿业", "action": "HOLD", "shares": 0, "price": 13.96, "reason": "无信号"},
+    {"symbol": "600900", "name": "长江电力", "action": "HOLD", "shares": 0, "price": 28.01, "reason": "无信号"}
+  ],
+  "date": "2026-07-08", "market": "cn", "mode": "mock",
+  "account_after": {"currency": "CNY", "cash": 377184.33, "total_assets": 999844.33, "initial_cash": 1000000.0}
+}

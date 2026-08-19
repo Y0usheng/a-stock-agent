@@ -1,0 +1,14 @@
+{
+  "_note": "沙盒演示运行(离线模拟行情)。正式日志由 run_daily.py 生成于 logs/decisions/",
+  "summary": "美股规则策略(mock)执行完毕",
+  "decisions": [
+    {"symbol": "AAPL", "name": "Apple", "action": "BUY", "shares": 160, "price": 261.33, "reason": "站上MA20+MACD金叉买入"},
+    {"symbol": "MSFT", "name": "Microsoft", "action": "HOLD", "shares": 0, "price": 593.4, "reason": "无信号"},
+    {"symbol": "NVDA", "name": "NVIDIA", "action": "BUY", "shares": 144, "price": 224.61, "reason": "站上MA20+MACD金叉买入"},
+    {"symbol": "TSLA", "name": "Tesla", "action": "HOLD", "shares": 0, "price": 386.07, "reason": "无信号"},
+    {"symbol": "GOOGL", "name": "Alphabet", "action": "HOLD", "shares": 0, "price": 224.82, "reason": "无信号"},
+    {"symbol": "AMZN", "name": "Amazon", "action": "BUY", "shares": 93, "price": 244.42, "reason": "站上MA20+MACD金叉买入"}
+  ],
+  "date": "2026-07-08", "market": "us", "mode": "mock",
+  "account_after": {"currency": "USD", "cash": 53112.3, "total_assets": 150000.0, "initial_cash": 150000.0}
+}
