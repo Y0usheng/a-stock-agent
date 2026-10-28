@@ -1,231 +1,184 @@
-# 双市场新闻动态选股模拟盘 Agent(A股 + 美股,学习项目)
+# 新闻驱动的长期投资模拟 Agent
 
-通过一个真实可跑的项目学习:**MCP → Agent SDK 多角色决策 → 选择性记忆 → 收益风险 Evals**(阶段4将引入 LangGraph 对比)。
+一个用新闻发现投资线索、用公司证据检验长期逻辑、再用模拟持仓和真实价格检验判断的研究项目。当前重点是 **A股**；美股与旧版实验代码保留，美股新增工作暂停。
 
-**免责声明:纯模拟盘学习项目,不构成投资建议。**
+它关注的不只是“今天该不该买”，还包括：**什么行业可能更有前景、哪些公司可能受益、依据是否可靠、什么价格满足建仓条件，以及持有后到底赚亏多少。** 所有交易只写入本地模拟账本，没有券商或真实资金接口。
 
-## 当前状态
+> 默认分支 [`main`](https://github.com/Y0usheng/a-stock-agent/tree/main) 提供当前长期投资模拟版本。完整改动与验证记录见 [PR #1](https://github.com/Y0usheng/a-stock-agent/pull/1)。
 
-- **实验平台第三阶段已完成**:历史新闻 SQLite、Prompt/模型版本追踪、可复现实验注册和过去训练/未来验证的置信度校准已接通。
-- 已完成新闻 MCP、动态候选池、多角色只读分析和双市场离线端到端验收。
-- 当前没有真实资金或券商接口；所有买卖仅写入本地 SQLite 模拟账本。
-- 未使用有效 API key 执行收费的 Agent SDK 推理；该路径已完成配置、导入、权限和结构测试。
+## 整个系统怎样运作
 
-## 架构
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ 投资经理(GPT/DeepSeek) → 技术+基本面(DeepSeek) → 风控(GPT/DeepSeek) │
-│        ↑ 选择性历史记忆           ↓ 所有模型角色都只读             │
-└──────────────────────────┬───────────────────────────────────┘
-                           │ MCP
-    ┌──────────────────────┼──────────────────────┐
-    │A股行情/基本面         │模拟账户               │美股行情/基本面
-┌───▼────┐ ┌───▼────┐ ┌───▼────┐ ┌───▼────┐
-│market  │ │account │ │us_market│ │account │
-│server  │ │server  │ │server   │ │server  │
-│akshare │ │CNY账本  │ │yfinance │ │USD账本 │
-│        │ │T+1/整手 │ │         │ │T+0/1股 │
-└────────┘ └────────┘ └─────────┘ └────────┘
-  决策+角色结论+记忆ID → logs/decisions/日期.市场.json
-                          ├→ evals/score.py 方向评分
-                          ├→ evals/report.py 收益风险/时变候选基准
-                          ├→ evals/backtest.py 60–120日滚动新闻A/B
-                          └→ data/experiments.db 数据/版本/指标实验注册表
+```mermaid
+flowchart TD
+    A[全局财经新闻与受控来源导入] --> B[冻结原文片段、来源与时间]
+    B --> C[关键词路由：形成待评价主题]
+    C --> D[模型判断：长期机制、反证与失效条件]
+    D --> E[选择公司研究对象，并保留已有持仓]
+    E --> F[冻结行情、基本面、底稿与模拟账户]
+    F --> G[技术分析师与基本面分析师]
+    G --> H[投资经理：论证、估值与持仓计划]
+    H --> I[独立风险经理审批]
+    I --> J[宿主校验；模拟交易计划确认]
+    J --> K[本地模拟账本与成交记录]
+    K --> L[真实价格、扣费净收益与研究评价]
+    L --> M[保存论证、补证任务与下次复核日期]
+    M --> E
 ```
 
-同一份 `account_server.py` 通过环境变量 `ASTOCK_MARKET` 加载不同市场规则;
-两个数据 server 工具接口完全一致,决策循环零改动复用——这是 MCP 抽象的价值。
+### 1. 新闻先发现主题，再寻找公司
 
-## 市场规则对比
+新闻MCP从东方财富全球财经快讯读取最近200条，并支持受控来源的文章导入。关键词只把新闻归入算力、电动车、医药、金融、资源等主题，不负责判断利好程度。
 
-|  | A股 (cn) | 美股 (us) |
-|---|---|---|
-| 初始资金 | ¥1,000,000 | $150,000 |
-| 最小单位 | 一手100股 | 1股 |
-| 回转交易 | T+1 | T+0 |
-| 费用 | 佣金万2.5(最低5元)+卖出印花税万5 | 零佣金 |
-| 模拟滑点 | 单边5 bps | 单边3 bps |
-| 单笔流动性 | 不超过当日成交量5% | 不超过当日成交量2% |
-| 行情源 | akshare | yfinance |
-| 新闻源 | 巨潮资讯公告 + 东方财富新闻 | yfinance/Yahoo；可选 Alpha Vantage |
+随后，一次模型判断区分结构变化、周期变化、短期噪声和风险，说明“这件事可能怎样影响收入或现金流”，给出反方观点、待核验项和失效条件。媒体转述、公司披露与模型推断分别标记。
 
-## 安装(Windows,需 Python 3.10+;推荐 3.12)
+当前主题映射覆盖12家受控A股公司，每轮最多新增3个研究对象；公司清单、仓位及交易参数在 [config.py](config.py)。公司与主题的关系仍待核验；池外行业显示覆盖缺口。新闻热度、转载数量或一个合作标题，都不能单独证明长期投资价值。
 
-```bash
-cd E:\a-stock-agent
+### 2. 公司研究使用四个角色
+
+| 角色 | 工作 |
+|---|---|
+| 技术分析师 | 查看真实价格、均线、成交量及历史走势 |
+| 基本面分析师 | 核对业务、财务、行业资料及来源时点 |
+| 投资经理 | 汇总论证，提出估值、目标仓位、建仓和退出条件 |
+| 风险经理 | 独立审核逐股计划，批准、缩量或拒绝 |
+
+默认模型配置为 `gpt-6.1-sol`，通过官方 `codex exec` 调用本机ChatGPT订阅登录；模型能否使用取决于账户、额度和客户端版本。两位分析师是独立分支，订阅请求按角色串行发送并共用预算。
+
+所有角色只读，不能直接下单。程序验证证据、价格、仓位和真实审批；经理自行写一句“风控通过”不会获得执行权限。
+
+### 3. 长期投资不等于每天重选股票
+
+默认协议采用三年投资论证、252交易日阶段观察、最长90天复核。三年是研究框架，不是保证持有三年；方向预测也不是每日交易开关。
+
+| 状态 | 含义 |
+|---|---|
+| 待补核心资料 | 业务、财务或估值依据不足；列具体补证任务，7天内复核 |
+| 等待价格 | 研究依据和估值可用，等待建仓条件 |
+| 计划建仓 | 提出目标仓位与交易计划，继续接受风控及宿主检查 |
+| 继续持有 | 既有论证延续，按期限及新事件复核 |
+| 减仓或退出 | 论证失效、估值或风险触发退出条件 |
+
+已有模拟持仓会保留。没有合格新主题时延续已有研究；没有已有研究则跳过。没有当天新闻不会自动清空论证，补证任务的首次期限也不会每天顺延。
+
+### 4. 判断能追溯到哪些资料
+
+新闻保存事件ID、链接、发布时间、首次采集时间、原文片段与内容哈希。只保存event_id无法保证供应商日后仍返回当时的内容，所以本地保留绑定片段；修订生成新身份，不覆盖旧版本。某行情日只能使用截止时已经采集的资料，不能把后来新闻回填成历史知识。
+
+公司底稿保存披露时间、报告期和页码/段落。结论引用冻结证据ID，宿主检查内容、股票范围及时间是否可用；主题引用还需提供可见片段中的连续原句。
+
+这些检查能确认引用存在，不能单独证明推断正确。项目另有事实/观点/推断拆分、抽样语义复核和原句定位。公司全文目前仍需取得并导入，尚未实现自动下载、逐页核对及独立人工标注。
+
+### 5. 模拟成交与真实收益
+
+`--shadow` 只分析；正式模拟入口出现交易计划时进入确认流程。确认绑定完整计划哈希，行情、账户等输入变化后不能直接恢复旧计划。
+
+A股账本当前配置为100万元初始模拟现金、一手100股、T+1、单股最高30%仓位，并计入佣金、卖出印花税、滑点和成交量参与率限制。这些是项目模拟参数，不是完整交易所规则的实现。
+
+成交使用唯一订单身份，重复提交不会重复扣款。组合收益来自实际模拟成交及真实价格估值，成交价已含滑点，统计时不再重复扣除。空仓零亏损不能直接证明策略有效。
+
+### 6. 用实验检验判断
+
+项目分别评价预测方向、论证与证据的关系、实际模拟组合收益和风险。研究工具支持预先登记假设、基线和成功标准，冻结输入，区分训练/验证/测试，同成本重放，并保留失败与无数据结果。
+
+旧版5日实验和新252日观察保持各自口径。真实历史价格搭配合成新闻的工程实验，会明确标记，不能当成真实历史新闻策略表现。
+
+## 页面能看到什么
+
+本地入口为 `http://127.0.0.1:5000/trading`：
+
+- 新闻主题、原文片段、模型假设、反证及公司入选/未选理由。
+- 真实收盘价、MA20/MA60、成交量和实际模拟买卖标记。
+- 现金、持仓、成交费用、浮盈亏与扣费后的组合净收益。
+- 入选后股票的独立价格观察；从严格晚于入选日的首个已收盘价格开始，至少两个后续价格才能计算涨跌。
+
+入选后的价格观察未计交易费用，也没有模拟成交，单独展示。过去股票涨跌不会补造为Agent历史收益。页面及 `/api/trading-view`、`/api/opportunities` 只读本地数据，刷新不会调用模型或交易；股价缓存需显式更新。
+
+## 本地运行
+
+当前以Windows、PowerShell和Python 3.12验证。先安装官方Codex CLI，使终端能够找到其可执行文件，按[官方认证说明](https://developers.openai.com/codex/auth)登录。
+
+```powershell
+git clone https://github.com/Y0usheng/a-stock-agent.git
+cd a-stock-agent
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
-```
 
-项目要求 `mcp>=1.19,<2.0`;MCP 2.0 已移除当前代码使用的 FastMCP 1.x 导入接口。
+# 登录由官方客户端完成，不向项目复制令牌
+codex login
+.venv\Scripts\python agent/run_daily.py --preflight
 
-## 运行
+# 完全离线规则演示：不调用模型、不提交模拟订单
+.venv\Scripts\python agent/run_daily.py --mock --offline --shadow
 
-```bash
-# 规则策略(无需 API key,先跑通)
-.venv\Scripts\python agent/run_daily.py --mock
+# 实时订阅分析：默认A股、长期协议，只分析
+.venv\Scripts\python agent/run_daily.py --shadow
 
-# 完全离线且可复现(推荐用于首次验收和回归测试)
-.venv\Scripts\python agent/run_daily.py --mock --offline
-
-# OpenAI Agents SDK 混合 Provider 多角色决策(默认)
-set OPENAI_API_KEY=sk-...
-set DEEPSEEK_API_KEY=sk-...
-.venv\Scripts\python agent/run_daily.py                # 双市场
-.venv\Scripts\python agent/run_daily.py --market cn    # 只跑A股
-.venv\Scripts\python agent/run_daily.py --market us    # 只跑美股
-
-# 投资经理和风险经理可独立切换 Provider
-.venv\Scripts\python agent/run_daily.py --manager-provider deepseek --risk-provider openai --market cn
-
-# Prompt 版本显式选择；版本和完整内容哈希会写入日志
-.venv\Scripts\python agent/run_daily.py --prompt-version manager-v2 --market us
-
-# 几个交易日后,给预测打分(分市场输出命中率)
-.venv\Scripts\python evals/score.py
-
-# 按数据指纹、Prompt 和各角色模型分组登记实验；此命令不调用模型
-.venv\Scripts\python evals/score.py --record-experiment
-
-# 组合收益、无未来泄漏时变候选基准、波动、最大回撤、Sharpe、Sortino、换手率
-.venv\Scripts\python evals/report.py
-
-# 60–120交易日滚动回测 + 新闻开/关 A/B（默认90日离线可复现）
-.venv\Scripts\python evals/backtest.py --market both --window 90
-
-# 查看历史新闻覆盖；导入供应商导出的 JSON/JSONL
-.venv\Scripts\python evals/news_store.py --summary
-.venv\Scripts\python evals/news_store.py --import-file history.jsonl --market us
-
-# 使用真实/导入历史新闻回测；窗口无数据时会拒绝降级成合成新闻
-.venv\Scripts\python evals/backtest.py --market us --window 90 --historical-news --record-experiment
-
-# Web 仪表盘(推荐):浏览器查看资产曲线/持仓/决策/命中率
+# 启动只读仪表盘，打开本地 /trading
 .venv\Scripts\python dashboard/app.py
-# 打开 http://127.0.0.1:5000
 ```
 
-- 实时模式采用 fail-closed：行情或新闻源不可验证时停止该市场任务，绝不会静默改用模拟数据
-- `--mock` 表示使用多角色规则替身且不调用模型；只有显式 `--offline` 才会生成可复现模拟行情和新闻事件
-- 交易使用行情截面日而非电脑当天日期；账户会校验本轮 `run_id` 和每日批准股票名单
-- 同一行情日默认只运行一次；`--force` 仅在该轮没有成交时允许覆盖分析日志，账户已有成交时仍会安全跳过
-- 每笔订单都有唯一幂等键，重复请求返回原成交结果，不会再次扣款或增减持仓
-- 买卖价加入保守单边滑点，并限制单笔成交量参与率；成交量无效/停牌时拒绝订单
-- 每日总资产、现金、持仓、估值价和数据源写入 SQLite `valuation_snapshots`，JSON 日志不再是唯一资产历史
-- 实时新闻成功抓取后幂等写入 `data/news_events.db`；历史回放的 SQL 上界严格限制在行情截面日
-- `manager-v1` 保留第二阶段基线，`manager-v2` 加入证据分级与概率式 confidence；切换版本才会改变行为
-- A/B 只比较 `dataset_fingerprint` 相同的实验；不同数据窗口的结果不会被伪装成模型优劣
-- 账户:`data/account_cn.db` / `data/account_us.db`(删除即重置资金)
-- 日志:`logs/decisions/YYYY-MM-DD.{cn,us}.json`;`logs/demo/` 为沙盒演示结果
+按需单独执行：
 
-## 为什么加入三个能力
-
-### Agent SDK 多角色分析
-
-把机会发现与风险批准拆开。技术分析师和基本面分析师固定使用 DeepSeek，风控经理可在 DeepSeek/GPT
-之间切换，投资经理可在 GPT/DeepSeek 之间切换并最终综合。角色使用独立上下文和只读工具，降低单一
-模型自己提出观点又自己批准的确认偏误。最终计划通过结构校验后由宿主按行情快照价统一执行，所有
-模型角色都没有下单权限。
-
-### 选择性历史记忆
-
-每天只注入当前行情日之前最近5个同市场决策日、非 HOLD 行为、预测摘要和最多12笔成交，生成可审计
-`memory_id`。全量日志会稀释当天信号、增加成本并诱发机械重复；选择性记忆让模型知道过去做过什么，
-但明确旧理由只是证据而不是指令，并严格阻止未来数据泄漏。
-
-### 收益风险 Evals
-
-方向命中率不等于赚钱，更不等于风险可接受。新增累计收益、时变候选等权基准、超额收益、年化波动、
-最大回撤、Sharpe、Sortino、交易次数和换手率。少于20个收益观察时不输出误导性的年化收益；
-真实和模拟行情严格同源评估。每个收益区间只使用区间起点已经入选的候选股，未来新闻才入选的股票
-不会被提前放进历史基准。
-
-### 滚动回测与新闻 A/B
-
-`evals/backtest.py` 支持60–120交易日窗口，信号只读取当日及以前数据，统一在下一交易日开盘成交，
-并计入滑点、佣金、印花税和成交量上限。同一份行情分别开启/关闭新闻门控，输出收益差、回撤和成交数。
-默认新闻是明确标记的可复现合成事件，只能验证工程链路和相对策略，不能当作真实历史新闻结论。
-
-### 新闻 MCP 与动态候选池
-
-每个市场维护12只受控候选宇宙，新闻 MCP 每日按公告/新闻事件强度选出8只，再自动并入已有持仓。
-新闻只决定“分析谁”和风险门控，不直接产生订单；技术、基本面、投资经理、风险经理、宿主契约和账户
-规则仍须全部通过。所有新闻保留来源与时间戳，严格过滤行情截面日之后的内容，并把正文标记为不可信
-证据以降低提示词注入和未来数据泄漏风险。A股默认使用巨潮资讯公告与东方财富新闻；美股默认使用
-yfinance/Yahoo，配置 `ALPHAVANTAGE_API_KEY` 后叠加 Alpha Vantage NEWS_SENTIMENT。
-
-### 实验平台、版本 A/B 与置信度校准
-
-实时新闻在抓取时增量落入 `data/news_events.db`，也可导入合法获得的供应商 JSON/JSONL 历史导出。
-事件以内容哈希去重，同一 `event_id` 被改写时拒绝写入；回测窗口没有真实事件时会直接报错，不会
-偷偷使用合成新闻。项目不会凭空附带商业历史新闻语料，因此刚升级时新闻库为 0 条是正常状态。
-
-每次 Agent SDK 运行会记录 Prompt 版本、完整 Prompt SHA-256 和四个角色的 provider/model。
-`evals/score.py --record-experiment` 将成熟预测按这些变体登记到 `data/experiments.db`；只有相同数据指纹才可做严格 A/B。
-置信度报告同时输出 Brier Score 与 ECE，并严格用较早日期拟合、较晚日期验证；样本少于8条或不足两个
-日期时只显示“样本不足”。这些本地评分命令不调用 GPT/DeepSeek，不产生模型 API 费用。
-
-## 测试
-
-```bash
+```powershell
+# 只采集与路由，零模型调用
+.venv\Scripts\python scripts/discover_opportunities.py --refresh --rules-only
+# 对存档新闻做一次主题判断，不触发公司四角色或下单
+.venv\Scripts\python scripts/discover_opportunities.py
+# 导入已核对的公司披露片段，查看补证任务
+.venv\Scripts\python scripts/company_research.py import-material material.json
+.venv\Scripts\python scripts/company_research.py tasks
+# 更新真实股价及HTML；首次可用--symbols指定研究对象
+.venv\Scripts\python scripts/refresh_trading_view.py --provider sina
+# 正式模拟入口：计划须按输出的完整哈希确认
+.venv\Scripts\python agent/run_daily.py --market cn
+# 本地研究闭环演示与回归
+.venv\Scripts\python scripts/research.py demo
 .venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-70项测试覆盖角色级 Provider 路由、多角色权限隔离、Agent SDK 只读工具、Prompt 版本、记忆截止日、防未来泄漏、收益风险公式、时变基准、
-决策与账本成交核对、宿主锁定成交价、每日幂等、离线行情可复现、预测到期判定、数据源隔离、
-订单校验、仓位上限、A 股 T+1、滑点、流动性、持久化估值、次日开盘回测、新闻去重/时间上界、
-实验指纹、Brier/ECE 与新闻 A/B。
+实时数据不可用时不冒充真实行情。新闻发现失败会记录错误，可延续可用的旧存档和既有研究；缺少当天新闻不一概否决已有长期论证。显式API/SDK对照、固定研究池及计划确认命令见专题文档。
 
-## 可选环境变量
+## 订阅、凭据与调用成本
 
-| 变量 | 用途 |
+**仓库不需要也不应包含任何人的订阅令牌。** 项目只调用本机官方客户端，先查询登录方式，再提交受约束的研究输入；不实现令牌提取、复制或上传。官方客户端将登录凭据存放在本机文件或系统凭据库中，`auth.json` 应像密码一样保管。见[官方凭据存储说明](https://developers.openai.com/codex/auth#login-caching)。
+
+订阅子进程剔除API密钥环境变量，关闭工具、联网搜索及其他Agent能力。临时输入/输出放在被Git忽略的 `data/` 中并尝试清理；原始认证错误不会直接写入项目日志。公开新闻和必要的虚拟账本数据会发送给模型服务完成分析。
+
+| 阶段 | 默认限制 |
 |---|---|
-| `OPENAI_API_KEY` | 投资经理或风险经理使用 GPT 时所需 API key |
-| `DEEPSEEK_API_KEY` | 技术、基本面及 DeepSeek 角色所需 API key |
-| `ASTOCK_MANAGER_PROVIDER` | 投资经理 Provider:`openai`(默认)或 `deepseek` |
-| `ASTOCK_RISK_PROVIDER` | 风险经理 Provider:`deepseek`(默认)或 `openai` |
-| `ASTOCK_OPENAI_MODEL` | GPT 模型,默认 `gpt-5.6` |
-| `ASTOCK_DEEPSEEK_MODEL` | DeepSeek 模型,默认 `deepseek-v4-flash` |
-| `DEEPSEEK_BASE_URL` | DeepSeek OpenAI 兼容地址,默认 `https://api.deepseek.com` |
-| `ASTOCK_OPENAI_TRACING=1` | 显式启用 OpenAI SDK tracing;默认关闭且不上传敏感 trace |
-| `ASTOCK_MAX_TURNS` | 单市场 Agent SDK 最大轮次,默认 `24` |
-| `ASTOCK_PROMPT_VERSION` | 投资经理 Prompt 版本:`manager-v1`(默认)或`manager-v2` |
-| `ASTOCK_OFFLINE=1` | 强制使用可复现离线行情,等价于 `--offline` |
-| `ALPHAVANTAGE_API_KEY` | 可选；增强美股新闻情绪与按时间范围检索，未配置时使用 yfinance/Yahoo |
-| `ASTOCK_DATA_DIR` | 覆盖 SQLite 账本目录,适合隔离测试 |
-| `ASTOCK_NEWS_DB` | 覆盖历史新闻 SQLite 路径 |
-| `ASTOCK_EXPERIMENT_DB` | 覆盖实验注册表 SQLite 路径 |
-| `ASTOCK_LOG_DIR` | 覆盖决策日志目录,适合隔离测试 |
+| 新主题判断 | 最多1次请求，75秒，12,000 tokens检查阈值 |
+| 公司四角色 | 最多4次请求，共40,000 tokens，每次120秒 |
+| 页面、本地规则与评分 | 不调用模型 |
 
-## 每日自动运行
+令牌阈值是调用前/完成后检查，不是精确截断生成；超限结果拒用，实际用量仍保留。相同发现输入可复用缓存。语义模型复核是额外的显式调用。订阅有额度限制；API对照须显式启用并按对应API用量计费，订阅失败不会静默切换。
 
-Windows 任务计划程序建两个任务:
-- A股:每天 15:30 → `python E:\a-stock-agent\agent\run_daily.py --market cn`
-- 美股:每天 05:30(美东收盘后)→ `python E:\a-stock-agent\agent\run_daily.py --market us`
+`.env.example` 只是示例清单，项目不自动加载；设置来自进程环境变量。Git忽略规则排除环境文件、登录缓存、私钥、数据库和原始日志。上传前检查暂存内容及本地可达历史：
 
-## 学习路线图
+```powershell
+python scripts/check_repository_secrets.py --history
+```
 
-- [x] **阶段1 MCP**:数据/账户 MCP server + MCP client 决策循环,双市场参数化
-- [x] **阶段1.1 稳定化**:可复现行情、交易日对齐、账户风控、可靠评分、自动化测试
-- [x] **阶段2 OpenAI Agents SDK 混合 Provider**:GPT/DeepSeek 角色路由、只读 agents-as-tools、宿主执行隔离
-- [x] **阶段3 上下文工程 + Evals 基线**:选择性历史记忆、收益风险和等权基准
-- [x] **阶段3.1 新闻动态候选池**:新闻 MCP、受控候选宇宙、新闻/技术共振与防未来泄漏
-- [x] **阶段3.2 可信评估**:时变候选基准、每日估值快照、成交成本、60–120日新闻A/B
-- [x] **阶段3.3 实验平台**:历史新闻采集/导入、Prompt/模型版本 A/B、置信度校准 ← 当前
-- [ ] **阶段4 LangGraph**:图编排重写(并行分析→风控分支→人工确认),与 Agent SDK 对比
+检查只输出文件名、规则和位置，不输出匹配内容，也不读取本机登录目录。模式扫描不能保证发现任意形式的秘密；发现泄漏须撤销/轮换凭据，删除当前文件不能清除历史曝光。
 
-## 关键学习点(读代码时注意)
+本仓库已开启GitHub密钥扫描和推送保护，协助发现并阻止受支持格式的凭据进入仓库；本地检查同时覆盖登录缓存文件名与运行数据路径。
 
-- `servers/*.py`:FastMCP 装饰器定义工具;docstring 会喂给 LLM,写法影响 agent 用得好不好
-- 两个市场数据 server 接口一致 → 决策循环无需改动即可跨市场复用(接口标准化的意义)
-- `account_server.py`:工具出错返回结构化 `{"ok": False, "error": ...}` 而非抛异常,agent 才能读懂并自我纠正
-- `agent/sdk_runner.py` 的 `_system_prompt`:市场规则动态生成进 prompt;要求结构化 JSON 输出 + 强制预测,是 evals 的数据基础
-- `evals/score.py`:预测 vs 实际的评分闭环——改 prompt 后分数变化就是迭代依据
-- `agent/sdk_runner.py`:角色级 Provider 路由、agents-as-tools、只读工具白名单和本地 JSON 校验
-- `agent/memory.py`:只选截止日前的紧凑历史,每次注入均可用 `memory_id` 追溯
-- `evals/performance.py`:组合与无未来泄漏时变基准的风险调整收益闭环
-- `evals/backtest.py`:收盘信号/次日开盘成交的滚动回测与新闻 A/B
-- `evals/news_store.py`:真实历史新闻的不可变落库、时间切片、导入和数据指纹
-- `agent/prompt_registry.py` / `evals/experiments.py`:Prompt 版本、角色模型与同数据集实验注册
-- `evals/calibration.py`:Brier、ECE 和严格时间外验证校准
+## 代码与进一步说明
+
+| 位置 | 职责 |
+|---|---|
+| `agent/run_daily.py`、`agent/graph_runner.py` | 日循环、冻结截面、编排、确认及执行校验 |
+| `agent/opportunities.py`、`agent/investment.py` | 主题、长期论证、底稿与补证任务 |
+| `agent/subscription.py`、`agent/evidence.py` | 订阅调用、预算和冻结证据 |
+| `servers/` | 行情、新闻及模拟账户MCP服务 |
+| `evals/` | 语义复核、收益风险、实验与重放 |
+| `dashboard/`、`scripts/`、`tests/` | 页面、操作入口与回归测试 |
+
+[新闻发现](docs/NEWS_OPPORTUNITIES.md) · [长期协议](docs/LONG_TERM_INVESTING.md) · [交易曲线](docs/TRADING_VIEW.md) · [模型接入](docs/MODEL_ACCESS.md) · [证据追溯](docs/EVIDENCE_TRACEABILITY.md) · [语义复核](docs/SEMANTIC_REVIEW_PLAN.md) · [实验闭环](docs/RESEARCH_LOOP.md) · [项目状态](docs/PROJECT_STATUS.md)
+
+## 当前边界
+
+数据和12家公司映射仅部分覆盖市场；公司公告全文核验尚未自动化，也没有独立标注的语义准确率。长期组合尚未积累足够的向前持仓记录，主题判断和流程测试不代表投资有效。
+
+当前通过231项回归（含4项凭据保护测试）；真实来源验收保存200条快讯、评价6个主题，未新增优先研究对象或模拟成交。新增主题区已通过接口和脚本检查，浏览器视觉验收仍待补。后续以对应提交的测试结果和项目状态为准。
+
+本项目用于研究与模拟，不构成投资建议。

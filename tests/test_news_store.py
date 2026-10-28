@@ -38,10 +38,21 @@ class NewsStoreTests(unittest.TestCase):
                        self.event("b", "2026-08-09", -0.25)], "us", "imported", self.db)
         scores1, manifest1 = load_news_scores("us", "2026-08-01", "2026-08-10", self.db)
         scores2, manifest2 = load_news_scores("us", "2026-08-01", "2026-08-10", self.db)
-        self.assertEqual(scores1[("2026-08-09", "AAPL")], 0.75)
+        self.assertNotIn(("2026-08-09", "AAPL"), scores1)
         self.assertEqual(scores1[("2026-08-10", "AAPL")], 0.75)
         self.assertEqual(manifest1["fingerprint"], manifest2["fingerprint"])
         self.assertEqual(manifest1["data_quality"], "historical_news")
+
+    def test_close_cutoff_and_timezone_exclude_after_close_and_date_only_news(self):
+        ingest_events([self.event("before", "2026-08-10T19:59:00+00:00", 1),
+                       self.event("after", "2026-08-10T20:01:00+00:00", 2),
+                       self.event("unknown", "2026-08-10", -1)], "us", "imported", self.db)
+        events = query_events("us", "AAPL", "2026-08-10", db_path=self.db)
+        self.assertEqual([event["event_id"] for event in events], ["before"])
+        scores, manifest = load_news_scores("us", "2026-08-10", "2026-08-11", self.db)
+        self.assertEqual(scores[("2026-08-10", "AAPL")], 1)
+        self.assertEqual(scores[("2026-08-11", "AAPL")], 2)
+        self.assertEqual(manifest["attention_by_day"]["2026-08-11"]["AAPL"], 4.75)
 
 
 if __name__ == "__main__":

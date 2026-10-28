@@ -1,6 +1,8 @@
 import unittest
+from copy import deepcopy
 
-from agent.contracts import reconcile_executions, validate_decision_result
+from agent.contracts import (capture_risk_review, reconcile_executions,
+                             validate_decision_result, validate_risk_approval)
 from agent.run_daily import execute_sdk_plan, run_mock
 from config import MARKETS
 
@@ -15,6 +17,18 @@ def _valid_result():
                             "confidence": 0.5, "rationale": "mixed"})
     return {"summary": "hold", "analyst_views": {"technical": "x", "fundamental": "y", "risk": "z"},
             "memory_assessment": "none", "decisions": decisions, "predictions": predictions}
+
+
+def _approve(result, verdict="APPROVE", maximum=None):
+    proposed = deepcopy(result["decisions"])
+    assessments = [{"symbol": item["symbol"], "action": item["action"],
+                    "verdict": verdict if item["action"] != "HOLD" else "APPROVE",
+                    "max_shares": (maximum if maximum is not None else item["shares"])
+                                  if item["action"] != "HOLD" else 0,
+                    "reason": "reviewed"} for item in proposed]
+    result["risk_review"] = capture_risk_review(
+        proposed, {"summary": "reviewed", "assessments": assessments},
+        "us", {item["symbol"] for item in proposed})
 
 
 class ContractTests(unittest.TestCase):
@@ -44,6 +58,67 @@ class ContractTests(unittest.TestCase):
                                   "horizon_days": 5, "confidence": 0.5,
                                   "rationale": "mixed"}]
         validate_decision_result(result, "us", expected_symbols={"META"})
+
+    def test_duplicate_or_non_object_rows_are_rejected(self):
+        for key in ("decisions", "predictions"):
+            for extra in ({"symbol": "AAPL"}, None):
+                with self.subTest(key=key, extra=extra):
+                    result = _valid_result()
+                    result[key].append(extra)
+                    with self.assertRaises(ValueError):
+                        validate_decision_result(result, "us")
+
+
+class RiskApprovalTests(unittest.TestCase):
+    def setUp(self):
+        self.result = _valid_result()
+        self.result["decisions"][0].update(action="BUY", shares=10)
+        self.symbols = {item["symbol"] for item in self.result["decisions"]}
+
+    def test_missing_approval_is_rejected_even_when_text_says_approve(self):
+        self.result["analyst_views"]["risk"] = "APPROVE"
+        with self.assertRaises(ValueError):
+            validate_risk_approval(self.result, "us", self.symbols)
+
+    def test_rejected_trade_and_unreviewed_direction_are_blocked(self):
+        _approve(self.result, "REJECT", 0)
+        with self.assertRaises(ValueError):
+            validate_risk_approval(self.result, "us", self.symbols)
+        _approve(self.result)
+        self.result["decisions"][0]["action"] = "SELL"
+        with self.assertRaises(ValueError):
+            validate_risk_approval(self.result, "us", self.symbols)
+
+    def test_resize_is_binding_and_manager_can_choose_hold(self):
+        _approve(self.result, "RESIZE", 5)
+        with self.assertRaises(ValueError):
+            validate_risk_approval(self.result, "us", self.symbols)
+        self.result["decisions"][0]["shares"] = 5
+        validate_risk_approval(self.result, "us", self.symbols)
+        self.result["decisions"][0].update(action="HOLD", shares=0)
+        validate_risk_approval(self.result, "us", self.symbols)
+
+    def test_approval_must_cover_exact_plan_with_valid_limits(self):
+        _approve(self.result)
+        valid = deepcopy(self.result["risk_review"])
+        for change in ("missing", "duplicate", "oversize", "fractional", "wrong-action"):
+            with self.subTest(change=change):
+                review = deepcopy(valid)
+                if change == "missing": review["assessments"].pop()
+                if change == "duplicate": review["assessments"].append(review["assessments"][0])
+                if change == "oversize": review["assessments"][0]["max_shares"] = 11
+                if change == "fractional": review["assessments"][0]["max_shares"] = 1.5
+                if change == "wrong-action": review["assessments"][0]["action"] = "SELL"
+                with self.assertRaises(ValueError):
+                    capture_risk_review(review["proposed_decisions"], review, "us", self.symbols)
+
+    def test_cn_resize_obeys_lot_size(self):
+        proposed = [{"symbol": "600519", "name": "贵州茅台", "action": "BUY",
+                     "shares": 200, "price": 100.0, "reason": "test"}]
+        review = {"summary": "resize", "assessments": [{"symbol": "600519", "action": "BUY",
+                  "verdict": "RESIZE", "max_shares": 50, "reason": "test"}]}
+        with self.assertRaises(ValueError):
+            capture_risk_review(proposed, review, "cn", {"600519"})
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -94,8 +169,10 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_host_locks_execution_price_and_records_rejection(self):
         result = _valid_result()
         result["decisions"][0].update(action="BUY", shares=5, price=1.0)
+        _approve(result)
 
         class Host:
+            market = "us"
             async def call(self, _name, args):
                 self.args = args
                 return {"ok": False, "error": "risk rejected"}
@@ -108,6 +185,42 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.args["price"], 123.0)
         self.assertEqual(result["decisions"][0]["action"], "HOLD")
         self.assertEqual(len(errors), 1)
+
+    async def test_whole_plan_is_rejected_before_any_order_is_submitted(self):
+        result = _valid_result()
+        result["decisions"][0].update(action="BUY", shares=5)
+        result["decisions"][1].update(action="BUY", shares=5)
+        _approve(result)
+        result["decisions"][1]["shares"] = 6
+
+        class Host:
+            market = "us"
+            calls = []
+
+            async def call(self, name, args):
+                self.calls.append(name)
+                return {"ok": True}
+
+        host = Host()
+        prices = {item["symbol"]: 100.0 for item in result["decisions"]}
+        with self.assertRaises(ValueError):
+            await execute_sdk_plan(host, result, prices, {symbol: 1000000 for symbol in prices})
+        self.assertEqual(host.calls, [])
+
+    async def test_mock_shadow_never_submits_orders(self):
+        class Host:
+            market = "us"
+            news_screen = {}
+
+            async def call(self, name, args):
+                if name == "candidate_fundamentals": return []
+                if name == "get_account":
+                    return {"cash": 1000.0, "total_assets": 1000.0, "positions": []}
+                raise AssertionError(f"shadow 不应调用 {name}")
+
+        result = await run_mock(Host(), {}, self._snapshot("us"), execute=False)
+        validate_decision_result(result, "us")
+        self.assertTrue(any(item["action"] == "BUY" for item in result["decisions"]))
 
     def test_fragmented_ledger_trades_are_aggregated(self):
         result = _valid_result()

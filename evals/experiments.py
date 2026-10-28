@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import EXPERIMENT_DB
+from evals.metrics import uses_synthetic_data
 
 
 SCHEMA_VERSION = "experiment-runs-v1"
@@ -116,6 +117,8 @@ def comparable_experiments(db_path: Path | str = EXPERIMENT_DB) -> list[dict]:
     """只把实验名、市场和数据指纹相同且变体不同的运行组成可比较 A/B 组。"""
     groups: dict[tuple[str, str, str], list[dict]] = {}
     for run in reversed(list_experiments(db_path, 200)):
+        if run["status"] != "complete":
+            continue
         key = (run["name"], run["market"], run["dataset_fingerprint"])
         groups.setdefault(key, []).append(run)
     output = []
@@ -149,9 +152,17 @@ def decision_log_variant(log: dict) -> dict:
     return {
         "strategy_version": log.get("strategy_version", "unknown"),
         "prompt_version": prompt.get("version", "unversioned"),
-        "prompt_sha256": prompt.get("sha256"),
+        # 完整 prompt 含行情日/候选池，仅用于日志审计，不能充当跨日版本标识。
+        # 旧日志没有模板哈希时按原版本分组，与有模板哈希的新日志保持隔离。
+        "prompt_template_sha256": prompt.get("template_sha256"),
+        "framework": sdk.get("framework", log.get("mode", "unknown")),
+        "model_access": sdk.get("model_access", "api"),
+        "model_settings": {key: (sdk.get("budget") or {}).get(key)
+                           for key in ("reasoning_effort", "max_output_tokens")},
         "role_models": sdk.get("role_models", {}),
         "mode": log.get("mode", "unknown"),
+        "execution_mode": log.get("execution_mode", "paper"),
+        "offline": uses_synthetic_data(log),
     }
 
 

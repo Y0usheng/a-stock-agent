@@ -26,6 +26,15 @@ class SyntheticDataTests(unittest.TestCase):
         long = random_walk_history(days=200, **args)
         pd.testing.assert_frame_equal(short, long.tail(20).reset_index(drop=True))
 
+    def test_later_end_date_does_not_rewrite_old_ohlcv(self):
+        args = dict(symbol="AAPL", days=100, base_prices={"AAPL": 200},
+                    drift=.0005, volatility=.02, volume_low=100, volume_high=1000, high_low_sigma=.009)
+        first = random_walk_history(end_date="2026-09-01", **args)
+        later = random_walk_history(end_date="2026-09-02", **args)
+        overlap = sorted(set(first["date"]) & set(later["date"]))
+        pd.testing.assert_frame_equal(first[first["date"].isin(overlap)].reset_index(drop=True),
+                                      later[later["date"].isin(overlap)].reset_index(drop=True))
+
 
 if __name__ == "__main__":
     unittest.main()

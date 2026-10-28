@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
-"""OpenAI Agents SDK 多角色投资决策编排（GPT / DeepSeek 混合路由）。"""
+"""OpenAI Agents SDK 多角色投资决策编排（统一 GPT 6.1 Sol）。"""
 from __future__ import annotations
 
 import json
 import os
 import re
+import asyncio
 from dataclasses import asdict, dataclass
 from time import perf_counter
 from typing import Any
 
 from agent.memory import memory_prompt
+from agent.runtime import ModelBudget, model_settings, positive_env
+from agent.contracts import capture_risk_review, validate_risk_approval
 from agent.prompt_registry import prompt_manifest, render_versioned_prompt, resolve_prompt_version
 from config import (
-    DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_MANAGER_PROVIDER,
     DEFAULT_OPENAI_MODEL,
     DEFAULT_RISK_PROVIDER,
@@ -21,7 +23,7 @@ from config import (
 )
 
 
-SUPPORTED_PROVIDERS = {"openai", "deepseek"}
+SUPPORTED_PROVIDERS = {"openai"}
 SPECIALIST_TOOL_ORDER = ("technical_analysis", "fundamental_analysis", "risk_review")
 
 RESULT_SCHEMA = {
@@ -97,24 +99,25 @@ def resolve_role_routing(
     manager_provider: str | None = None,
     risk_provider: str | None = None,
 ) -> dict[str, RoleModel]:
-    """解析角色级模型路由；技术面和基本面按约定固定使用 DeepSeek。"""
+    """四个角色共用同一模型；遗留非 OpenAI 配置明确报错，避免悄悄混用。"""
     manager = _provider(
         manager_provider, "ASTOCK_MANAGER_PROVIDER", DEFAULT_MANAGER_PROVIDER
     )
     risk = _provider(risk_provider, "ASTOCK_RISK_PROVIDER", DEFAULT_RISK_PROVIDER)
     openai_model = os.environ.get("ASTOCK_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
-    deepseek_model = os.environ.get("ASTOCK_DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
+    if not openai_model.strip():
+        raise ValueError("ASTOCK_OPENAI_MODEL 不能为空")
 
     def selection(provider: str) -> RoleModel:
         return RoleModel(
             provider=provider,
-            model=openai_model if provider == "openai" else deepseek_model,
+            model=openai_model.strip(),
         )
 
     return {
         "investment-manager": selection(manager),
-        "technical-analyst": selection("deepseek"),
-        "fundamental-analyst": selection("deepseek"),
+        "technical-analyst": selection("openai"),
+        "fundamental-analyst": selection("openai"),
         "risk-manager": selection(risk),
     }
 
@@ -155,7 +158,12 @@ def build_agent_definitions(
             description="独立审查候选交易的仓位、现金、集中度、T+1 与下行情景。",
             prompt=(
                 "读取最新账户、行情和成交记录。逐笔给出 APPROVE/REJECT/RESIZE 与"
-                "最大允许股数；证据不足时拒绝，不得下单。"
+                "最大允许股数；证据不足时拒绝，不得下单。输入是 {decisions:[...]}，"
+                "必须逐只覆盖送审股票，每只恰好一次，action 保持送审方向。只返回 JSON："
+                '{"summary":"总评","assessments":[{"symbol":"代码","action":"BUY/SELL/HOLD",'
+                '"verdict":"APPROVE/REJECT/RESIZE","max_shares":0,"reason":"依据"}]}。'
+                "APPROVE 的 max_shares 等于送审股数；RESIZE 必须严格缩量且符合最小单位；"
+                "REJECT 或 HOLD 的 max_shares 必须为0。"
             ),
             tools=("market_watchlist_snapshot", "news_candidate_screen", "news_symbol",
                    "account_snapshot", "account_trades"),
@@ -176,33 +184,26 @@ class ModelFactory:
 
         from openai import AsyncOpenAI
 
-        if provider == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if not api_key:
-                raise RuntimeError("投资经理或风险角色使用 GPT 时需要 OPENAI_API_KEY")
-            kwargs: dict[str, Any] = {"api_key": api_key}
-            if os.environ.get("OPENAI_BASE_URL"):
-                kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
-        else:
-            api_key = os.environ.get("DEEPSEEK_API_KEY")
-            if not api_key:
-                raise RuntimeError("DeepSeek 角色需要 DEEPSEEK_API_KEY")
-            kwargs = {
-                "api_key": api_key,
-                "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            }
+        if provider != "openai":
+            raise ValueError("四个角色仅支持统一 OpenAI 模型配置")
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("四个 GPT 角色需要本机环境变量 OPENAI_API_KEY")
+        kwargs: dict[str, Any] = {"api_key": api_key, "timeout": 90.0, "max_retries": 0}
+        if os.environ.get("OPENAI_BASE_URL"):
+            kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
         self._clients[provider] = AsyncOpenAI(**kwargs)
         return self._clients[provider]
 
     def model_for(self, selection: RoleModel):
-        from agents import OpenAIChatCompletionsModel, OpenAIResponsesModel
+        from agents import OpenAIResponsesModel
 
         client = self._client(selection.provider)
-        if selection.provider == "openai":
-            return OpenAIResponsesModel(model=selection.model, openai_client=client)
-        # DeepSeek 的 OpenAI 兼容 Chat Completions 是最低共同能力面；最终 JSON
-        # 仍由本地 contract 校验，避免依赖提供商特有的严格 Structured Outputs。
-        return OpenAIChatCompletionsModel(model=selection.model, openai_client=client)
+        return OpenAIResponsesModel(model=selection.model, openai_client=client)
+
+    async def close(self):
+        for client in self._clients.values():
+            await client.close()
 
 
 def _json_output(value: Any) -> str:
@@ -285,6 +286,9 @@ def build_read_only_tools(host) -> dict[str, Any]:
 
 def _system_prompt(market: str, as_of_date: str, active_symbols: list[str] | None = None,
                    prompt_version: str | None = None) -> str:
+    from agent.investment import is_long, manager_prompt
+    if is_long(resolve_prompt_version(prompt_version)):
+        return manager_prompt(market, as_of_date, active_symbols or [item["symbol"] for item in MARKETS[market]["watchlist"]])
     market_config = MARKETS[market]
     lot_rule = (
         f"股数必须是 {market_config['lot_size']} 的整数倍"
@@ -300,7 +304,7 @@ def _system_prompt(market: str, as_of_date: str, active_symbols: list[str] | Non
 1. 调用 technical_analysis；
 2. 调用 fundamental_analysis；
 3. 读取账户和行情，形成候选交易计划；
-4. 把包含具体 action、shares、理由的候选计划交给 risk_review；
+4. 将完整候选池决策以 JSON {{"decisions":[...]}} 交给 risk_review，每项包含 symbol、name、action、shares、price、reason；
 5. 只接受风险专家批准或缩量后的计划，输出最终结果。你和专家都不得直接下单。
 
 硬约束：仅限今日动态候选池；{lot_rule}；{settlement}；单股市值不超过总资产
@@ -313,6 +317,44 @@ def _system_prompt(market: str, as_of_date: str, active_symbols: list[str] | Non
     return render_versioned_prompt(base, prompt_version)[0]
 
 
+def build_prompt_manifest(market: str, as_of_date: str, active_symbols: list[str],
+                          prompt_version: str | None = None) -> dict:
+    """同时记录完整运行 prompt 与不含每日变量的策略模板身份。"""
+    rendered = _system_prompt(market, as_of_date, active_symbols, prompt_version)
+    template = _system_prompt(market, "<AS_OF_DATE>", ["<ACTIVE_SYMBOLS>"], prompt_version)
+    definitions = build_agent_definitions()
+    template_spec = _json_output({
+        "manager": template,
+        "roles": {name: {"prompt": role.prompt, "tools": role.tools}
+                  for name, role in definitions.items()},
+    })
+    return prompt_manifest(rendered, prompt_version, template_spec)
+
+
+def risk_output_extractor(audit: dict, market: str, expected_symbols: set[str]):
+    """直接捕获子 Agent 输入/输出，投资经理没有写入 audit 的权限。"""
+    async def extract(run_result) -> str:
+        audit.clear()
+        submitted = parse_agent_result(run_result.input)
+        review = parse_agent_result(run_result.final_output)
+        captured = capture_risk_review(submitted.get("decisions"), review,
+                                       market, expected_symbols)
+        audit.update(captured)
+        return _json_output(captured)
+    return extract
+
+
+def build_specialists(host, routing: dict[str, RoleModel], factory: ModelFactory):
+    from agents import Agent
+    definitions = build_agent_definitions(routing)
+    tools = build_read_only_tools(host)
+    return {name: Agent(name=name, instructions=definition.prompt,
+                        model=factory.model_for(definition.model),
+                        model_settings=model_settings(),
+                        tools=[tools[tool] for tool in definition.tools])
+            for name, definition in definitions.items() if name != "investment-manager"}
+
+
 def build_agents(
     host,
     market: str,
@@ -320,6 +362,8 @@ def build_agents(
     routing: dict[str, RoleModel],
     model_factory: ModelFactory | None = None,
     prompt_version: str | None = None,
+    risk_audit: dict | None = None,
+    budget: ModelBudget | None = None,
 ):
     """构建三个只读专家和一个保留最终控制权的投资经理。"""
     from agents import Agent
@@ -328,27 +372,10 @@ def build_agents(
     factory = model_factory or ModelFactory()
     tools = build_read_only_tools(host)
 
-    technical_definition = definitions["technical-analyst"]
-    technical = Agent(
-        name="technical-analyst",
-        instructions=technical_definition.prompt,
-        model=factory.model_for(technical_definition.model),
-        tools=[tools[name] for name in technical_definition.tools],
-    )
-    fundamental_definition = definitions["fundamental-analyst"]
-    fundamental = Agent(
-        name="fundamental-analyst",
-        instructions=fundamental_definition.prompt,
-        model=factory.model_for(fundamental_definition.model),
-        tools=[tools[name] for name in fundamental_definition.tools],
-    )
-    risk_definition = definitions["risk-manager"]
-    risk = Agent(
-        name="risk-manager",
-        instructions=risk_definition.prompt,
-        model=factory.model_for(risk_definition.model),
-        tools=[tools[name] for name in risk_definition.tools],
-    )
+    specialists = build_specialists(host, routing, factory)
+    technical = specialists["technical-analyst"]
+    fundamental = specialists["fundamental-analyst"]
+    risk = specialists["risk-manager"]
 
     manager_definition = definitions["investment-manager"]
     manager = Agent(
@@ -357,6 +384,7 @@ def build_agents(
             market, as_of_date, getattr(host, "active_symbols", None), prompt_version
         ),
         model=factory.model_for(manager_definition.model),
+        model_settings=model_settings(),
         tools=[
             tools["market_watchlist_snapshot"],
             tools["news_candidate_screen"],
@@ -365,16 +393,27 @@ def build_agents(
                 tool_name="technical_analysis",
                 tool_description="对整个股票池执行只读技术面分析。",
                 max_turns=8,
+                hooks=budget,
+                failure_error_function=None,
             ),
             fundamental.as_tool(
                 tool_name="fundamental_analysis",
                 tool_description="对整个股票池执行只读基本面比较。",
                 max_turns=6,
+                hooks=budget,
+                failure_error_function=None,
             ),
             risk.as_tool(
                 tool_name="risk_review",
                 tool_description="审查一份具体候选交易计划并批准、拒绝或缩量。",
                 max_turns=6,
+                hooks=budget,
+                custom_output_extractor=risk_output_extractor(
+                    risk_audit if risk_audit is not None else {}, market,
+                    set(getattr(host, "active_symbols", None) or
+                        [item["symbol"] for item in MARKETS[market]["watchlist"]]),
+                ),
+                failure_error_function=None,
             ),
         ],
     )
@@ -382,7 +421,7 @@ def build_agents(
 
 
 def parse_agent_result(output: Any) -> dict:
-    """兼容 GPT/DeepSeek 的文本 JSON 输出，并交给宿主 contract 做最终校验。"""
+    """解析模型文本 JSON 输出，并交给宿主 contract 做最终校验。"""
     if isinstance(output, dict):
         return output
     if hasattr(output, "model_dump"):
@@ -428,6 +467,9 @@ def validate_specialist_sequence(tool_calls: list[str]) -> None:
     if missing:
         raise RuntimeError(f"投资经理跳过了必需专家：{', '.join(missing)}")
     last_risk = max(i for i, name in enumerate(tool_calls) if name == "risk_review")
+    first = [tool_calls.index(name) for name in SPECIALIST_TOOL_ORDER]
+    if first != sorted(first):
+        raise RuntimeError("专家调用顺序必须为技术面、基本面、风控")
     for required in ("technical_analysis", "fundamental_analysis"):
         if max(i for i, name in enumerate(tool_calls) if name == required) > last_risk:
             raise RuntimeError("风险复核之后又调用分析专家，最终计划未经风险复核")
@@ -449,11 +491,18 @@ async def run_agent_sdk(
     started = perf_counter()
     routing = resolve_role_routing(manager_provider, risk_provider)
     prompt_version = resolve_prompt_version(prompt_version)
-    rendered_prompt = _system_prompt(
-        market, as_of_date, getattr(host, "active_symbols", None), prompt_version
-    )
-    manifest = prompt_manifest(rendered_prompt, prompt_version)
-    manager = build_agents(host, market, as_of_date, routing, prompt_version=prompt_version)
+    active_symbols = getattr(host, "active_symbols", None) or [
+        item["symbol"] for item in MARKETS[market]["watchlist"]]
+    manifest = build_prompt_manifest(market, as_of_date, active_symbols, prompt_version)
+    risk_audit: dict = {}
+    budget = ModelBudget()
+    factory = ModelFactory()
+    try:
+        manager = build_agents(host, market, as_of_date, routing, model_factory=factory,
+                               prompt_version=prompt_version, risk_audit=risk_audit, budget=budget)
+    except BaseException:
+        await factory.close()
+        raise
     tracing_enabled = os.environ.get("ASTOCK_OPENAI_TRACING", "0").lower() in {
         "1", "true", "yes"
     }
@@ -471,15 +520,19 @@ async def run_agent_sdk(
         },
     )
     prompt = "开始今日多角色决策。\n\n" + memory_prompt(memory)
-    run_result = await Runner.run(
-        manager,
-        prompt,
-        max_turns=int(os.environ.get("ASTOCK_MAX_TURNS", "24")),
-        run_config=run_config,
-    )
+    try:
+        run_result = await asyncio.wait_for(Runner.run(
+            manager, prompt, hooks=budget,
+            max_turns=positive_env("ASTOCK_MAX_TURNS", 24), run_config=run_config,
+        ), timeout=positive_env("ASTOCK_ANALYSIS_TIMEOUT", 600))
+    finally:
+        await factory.close()
     tool_calls = extract_tool_calls(run_result)
     validate_specialist_sequence(tool_calls)
     result = parse_agent_result(run_result.final_output)
+    # 无论经理输出是否包含同名字段，都只能采用宿主直接捕获的专家结果。
+    result["risk_review"] = risk_audit
+    validate_risk_approval(result, market, set(active_symbols))
     usage = run_result.context_wrapper.usage
     result["agent_sdk"] = {
         "framework": "openai-agents",
@@ -489,6 +542,7 @@ async def run_agent_sdk(
         "last_response_id": run_result.last_response_id,
         "tool_calls": tool_calls,
         "tracing_enabled": tracing_enabled,
+        "budget": budget.report(),
         "usage": {
             "requests": usage.requests,
             "input_tokens": usage.input_tokens,

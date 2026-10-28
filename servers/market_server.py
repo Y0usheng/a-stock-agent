@@ -23,6 +23,7 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 from config import MARKETS
 from servers.synthetic_data import random_walk_history
+from servers.data_quality import completed_history
 from servers.fundamentals_data import mock_fundamentals
 
 WATCHLIST = MARKETS["cn"]["watchlist"]
@@ -70,10 +71,12 @@ def _fetch_history(symbol: str, days: int = 120) -> pd.DataFrame:
         try:
             start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
             df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                    start_date=start, adjust="qfq")
+                                    start_date=start, adjust="qfq", timeout=30)
             df = df.rename(columns={"日期": "date", "开盘": "open", "最高": "high",
                                     "最低": "low", "收盘": "close", "成交量": "volume"})
             df["date"] = df["date"].astype(str)
+            df["volume"] = df["volume"] * 100  # stock_zh_a_hist 成交量单位为手，账户统一为股
+            df = completed_history(df, "cn")
             df = df[["date", "open", "high", "low", "close", "volume"]].tail(days).reset_index(drop=True)
             if len(df) > 0:
                 _cache[key] = df
