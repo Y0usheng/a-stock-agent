@@ -1,5 +1,21 @@
 .venv/
 .env
+.env.*
+!.env.example
+# 登录缓存、令牌与私钥不得进入仓库
+.codex/
+.ssh/
+auth.json
+chatgpt-auth.json
+credentials.json
+id_rsa
+id_ed25519
+*.pem
+*.key
+*.p12
+*.pfx
+cookies.json
+cookies.txt
 __pycache__/
 *.py[cod]
 .pytest_cache/
