@@ -40,6 +40,20 @@ class LiveDataSafetyTests(unittest.TestCase):
         with patch.dict(os.environ, {"ASTOCK_OFFLINE": "1"}):
             _assert_live_data(snapshot, {"ok": True})
 
+    def test_live_dates_must_be_same_fresh_and_prices_finite(self):
+        from datetime import date, timedelta
+        snapshot = [{"symbol": "AAPL", "date": date.today().isoformat(),
+                     "close": 100., "volume": 1000, "data_source": "yfinance"}]
+        with patch.dict(os.environ, {"ASTOCK_OFFLINE": ""}):
+            _assert_live_data(snapshot, {"ok": True})
+            snapshot[0]["close"] = float("inf")
+            with self.assertRaises(RuntimeError):
+                _assert_live_data(snapshot, {"ok": True})
+            snapshot[0]["close"] = 100.
+            snapshot[0]["date"] = (date.today() - timedelta(days=15)).isoformat()
+            with self.assertRaises(RuntimeError):
+                _assert_live_data(snapshot, {"ok": True})
+
 
 if __name__ == "__main__":
     unittest.main()

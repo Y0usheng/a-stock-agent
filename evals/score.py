@@ -32,17 +32,64 @@ DATA = {"cn": market_server, "us": us_market_server}
 
 def actual_direction(market: str, symbol: str, start: str, horizon: int,
                      synthetic: bool = False) -> str | None:
+    outcome = prediction_outcome(market, symbol, start, horizon, synthetic)
+    return outcome["actual"] if outcome else None
+
+
+def prediction_outcome(market: str, symbol: str, start: str, horizon: int,
+                       synthetic: bool = False) -> dict | None:
     fetch = DATA[market]._mock_history if synthetic else DATA[market]._fetch_history
     df = fetch(symbol, EVALUATION_HISTORY_DAYS)
-    return actual_direction_from_frame(df, start, horizon)
+    actual = actual_direction_from_frame(df, start, horizon)
+    if actual is None:
+        return None
+    dates = df["date"].astype(str).tolist()
+    start_index = dates.index(start)
+    prices = df.iloc[start_index:start_index + horizon + 1][["date", "close"]].to_dict("records")
+    return {"actual": actual, "fingerprint": canonical_hash({
+        "market": market, "symbol": symbol, "synthetic": synthetic, "prices": prices,
+    })}
+
+
+def group_scored_rows(rows: list[dict]) -> list[list[dict]]:
+    grouped = {}
+    for row in rows:
+        key = row["market"] + ":" + canonical_hash(row["variant"])
+        grouped.setdefault(key, []).append(row)
+    return list(grouped.values())
+
+
+def record_scored_experiments(rows: list[dict], db_path: Path = EXPERIMENT_DB) -> list[dict]:
+    runs = []
+    for group in group_scored_rows(rows):
+        references = [{key: row.get(key) for key in (
+            "date", "market", "symbol", "actual", "horizon_days",
+            "input_fingerprint", "outcome_fingerprint",
+        )} for row in group]
+        references.sort(key=lambda item: (item["date"], item["market"], item["symbol"]))
+        dataset = {"schema": "matured-direction-predictions-v2", "items": references}
+        dataset["fingerprint"] = canonical_hash(dataset)
+        hit = sum(row["correct"] for row in group)
+        runs.append(record_experiment(
+            "prompt-model-direction-score", group[0]["market"], dataset,
+            group[0]["variant"],
+            {"sample_count": len(group), "hit_count": hit,
+             "accuracy": round(hit / len(group), 6),
+             "calibration": chronological_calibration(group)},
+            db_path=db_path,
+            notes="输入截面、到期价格和预测范围均相同的不同 variant 才能直接做 A/B。",
+        ))
+    return runs
 
 
 def main():
     parser = argparse.ArgumentParser(description="评分预测并可登记 Prompt/模型实验")
     parser.add_argument("--record-experiment", action="store_true")
     parser.add_argument("--experiment-db", type=Path, default=EXPERIMENT_DB)
+    parser.add_argument("--shadow", action="store_true", help="只评分 shadow 分析日志，不混入模拟成交成绩")
     args = parser.parse_args()
-    logs = sorted(LOG_DIR.glob("*.json"))
+    log_dir = LOG_DIR / "shadow" if args.shadow else LOG_DIR
+    logs = sorted(log_dir.glob("*.json"))
     if not logs:
         print("暂无决策日志,先运行 agent/run_daily.py")
         return
@@ -56,12 +103,13 @@ def main():
         if market not in DATA or not start:
             continue
         for p in data.get("predictions", []):
-            act = actual_direction(market, p["symbol"], start,
-                                   p.get("horizon_days", 5),
-                                   synthetic=uses_synthetic_data(data))
-            if act is None:
+            outcome = prediction_outcome(market, p["symbol"], start,
+                                         p.get("horizon_days", 5),
+                                         synthetic=uses_synthetic_data(data))
+            if outcome is None:
                 pending += 1
                 continue
+            act = outcome["actual"]
             ok = act == p["direction"]
             stats[market][0] += 1
             stats[market][1] += ok
@@ -71,6 +119,8 @@ def main():
                 "mark": "✓" if ok else "✗", "confidence": p.get("confidence"),
                 "horizon_days": p.get("horizon_days", 5),
                 "variant": decision_log_variant(data),
+                "input_fingerprint": data.get("dataset_fingerprint"),
+                "outcome_fingerprint": outcome["fingerprint"],
             })
     print(f"{'日期':12s}{'市场':4s}{'代码':10s}{'预测':6s}{'实际':6s}{'命中':4s}置信度")
     for r in rows:
@@ -84,38 +134,22 @@ def main():
         print("所有预测均未到期,过几个交易日再来评分")
     if pending:
         print(f"未到期: {pending} 条")
-    calibration = chronological_calibration(rows)
-    if calibration["status"] == "complete":
-        print("置信度未来集: 原始 Brier={:.3f}, ECE={:.3f}; 校准后 Brier={:.3f}, ECE={:.3f}".format(
-            calibration["raw"]["brier_score"], calibration["raw"]["expected_calibration_error"],
-            calibration["calibrated"]["brier_score"],
-            calibration["calibrated"]["expected_calibration_error"],
-        ))
-    else:
-        print("置信度校准:", calibration["message"])
+    for group in group_scored_rows(rows) or [[]]:
+        calibration = chronological_calibration(group)
+        label = (group[0]["market"] + "/" +
+                 group[0]["variant"].get("prompt_version", "unversioned") + "/" +
+                 canonical_hash(group[0]["variant"])[:8]) if group else "暂无变体"
+        if calibration["status"] == "complete":
+            print("[{}] 置信度未来集: 原始 Brier={:.3f}, ECE={:.3f}; 校准后 Brier={:.3f}, ECE={:.3f}".format(
+                label, calibration["raw"]["brier_score"], calibration["raw"]["expected_calibration_error"],
+                calibration["calibrated"]["brier_score"],
+                calibration["calibrated"]["expected_calibration_error"],
+            ))
+        else:
+            print(f"[{label}] 置信度校准:", calibration["message"])
     if args.record_experiment:
-        grouped = {}
-        for row in rows:
-            key = row["market"] + ":" + canonical_hash(row["variant"])
-            grouped.setdefault(key, []).append(row)
-        for group in grouped.values():
-            references = [{key: row[key] for key in
-                           ("date", "market", "symbol", "actual", "horizon_days")}
-                          for row in group]
-            references.sort(key=lambda item: (item["date"], item["market"], item["symbol"]))
-            dataset = {"schema": "matured-direction-predictions-v1", "items": references}
-            dataset["fingerprint"] = canonical_hash(dataset)
-            hit = sum(row["correct"] for row in group)
-            record_experiment(
-                "prompt-model-direction-score", group[0]["market"], dataset,
-                group[0]["variant"],
-                {"sample_count": len(group), "hit_count": hit,
-                 "accuracy": round(hit / len(group), 6),
-                 "calibration": chronological_calibration(group)},
-                db_path=args.experiment_db,
-                notes="只有 dataset_fingerprint 相同的不同 variant 才能直接做 A/B。",
-            )
-        print(f"已登记 {len(grouped)} 个 Prompt/模型变体实验")
+        runs = record_scored_experiments(rows, args.experiment_db)
+        print(f"已登记 {len(runs)} 个 Prompt/模型变体实验")
 
 
 if __name__ == "__main__":

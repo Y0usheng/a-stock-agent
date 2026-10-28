@@ -37,6 +37,7 @@ MARKETS = {
             {"symbol": "300308", "name": "中际旭创"},
         ],
         "candidate_limit": 8,
+        "investment_watchlist": ["300750", "600036", "600519"],
         "initial_cash": 1_000_000.0,
         "lot_size": 100,          # 一手100股
         "t_plus_1": True,         # 当日买入不可当日卖出
@@ -91,9 +92,8 @@ MARKETS = {
 
 LOG_DIR = Path(os.environ.get("ASTOCK_LOG_DIR", ROOT / "logs" / "decisions"))
 
-# 多提供商 Agent 模型路由。角色级环境变量在 agent/sdk_runner.py 中解析。
-DEFAULT_OPENAI_MODEL = "gpt-5.6"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+# 四个角色统一使用 OpenAI Responses API；共享一个模型配置。
+DEFAULT_OPENAI_MODEL = "gpt-6.1-sol"
 DEFAULT_MANAGER_PROVIDER = "openai"
-DEFAULT_RISK_PROVIDER = "deepseek"
+DEFAULT_RISK_PROVIDER = "openai"
 DEFAULT_PROMPT_VERSION = "manager-v1"

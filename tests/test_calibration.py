@@ -1,6 +1,6 @@
 import unittest
 
-from evals.calibration import calibration_metrics, chronological_calibration
+from evals.calibration import calibration_metrics, chronological_calibration, variant_calibration
 
 
 class CalibrationTests(unittest.TestCase):
@@ -31,6 +31,23 @@ class CalibrationTests(unittest.TestCase):
             {"date": "2026-01-01", "confidence": 0.6, "correct": True}
         ])
         self.assertEqual(report["status"], "insufficient_data")
+
+    def test_different_model_samples_are_never_pooled_for_calibration(self):
+        rows = [{"date": day, "market": "us", "symbol": str(index),
+                 "confidence": 0.6, "correct": True, "variant": {"model": model}}
+                for model in ("first", "second")
+                for day in ("2026-01-01", "2026-01-02") for index in range(2)]
+        report = variant_calibration(rows)
+        self.assertEqual(report["calibration"]["status"], "multiple_variants")
+        self.assertEqual(len(report["calibration_by_variant"]), 2)
+        self.assertTrue(all(entry["calibration"]["status"] == "insufficient_data"
+                            for entry in report["calibration_by_variant"]))
+
+    def test_single_variant_keeps_existing_summary_shape(self):
+        report = variant_calibration([{"date": "2026-01-01", "market": "us",
+                                      "confidence": 0.6, "correct": True}])
+        self.assertEqual(report["calibration"]["status"], "insufficient_data")
+        self.assertEqual(len(report["calibration_by_variant"]), 1)
 
 
 if __name__ == "__main__":

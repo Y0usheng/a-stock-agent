@@ -8,6 +8,15 @@ __pycache__/
 # 本地运行状态
 data/
 logs/decisions/*.json
+logs/decisions/shadow/
+logs/decisions/pending/
+logs/reviews/
+logs/research/
+logs/live/
+logs/demo/*.semantic-*.json
+logs/demo/*.news-evidence.*.json
+logs/demo/research-*.json
+logs/demo/research-*.md
 
 # 编辑器与系统文件
 .idea/

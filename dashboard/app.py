@@ -18,18 +18,54 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import EXPERIMENT_DB, MARKETS, LOG_DIR, NEWS_DB
-from evals.calibration import chronological_calibration
-from evals.experiments import comparable_experiments, list_experiments
+from evals.calibration import variant_calibration
+from evals.experiments import comparable_experiments, list_experiments, decision_log_variant
 from evals.metrics import (EVALUATION_HISTORY_DAYS,
                            actual_direction_from_frame,
                            prediction_start_date,
                            uses_synthetic_data)
 from evals.performance import indexed_curve, load_valuation_snapshots, performance_report
 from evals.news_store import dataset_summary
+from agent.operations import operation_summary
 
 from flask import Flask, jsonify
 
 app = Flask(__name__)
+
+
+@app.route("/api/opportunities")
+def opportunities_data():
+    from agent.opportunities import OpportunityBook
+    try:
+        return jsonify(OpportunityBook().view())
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        from agent.errors import safe_error
+        return jsonify({"status": "error", "message": safe_error(exc)}), 503
+
+
+@app.route("/api/trading-view")
+def trading_view_data():
+    from evals.trading_view import load_view
+    try:
+        return jsonify(load_view())
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        from agent.errors import safe_error
+        return jsonify({"status": "error", "message": safe_error(exc)}), 503
+
+
+@app.route("/trading")
+def trading_view_page():
+    from evals.trading_view import load_view, render_html
+    try:
+        return render_html(load_view())
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        from agent.errors import safe_error
+        return render_html({"status": "error", "message": safe_error(exc)}), 503
+
+
+@app.route("/api/operations")
+def operations():
+    return jsonify(operation_summary())
 
 
 def _positions(market: str) -> tuple[list, float]:
@@ -56,16 +92,19 @@ def _trades(market: str, limit: int = 50) -> list:
     return rows
 
 
-def _logs(market: str) -> list:
+def _logs(market: str, include_shadow=False) -> list:
     out = []
-    for f in sorted(LOG_DIR.glob(f"*.{market}.json")):
+    paths = [*LOG_DIR.glob(f"*.{market}.json")]
+    if include_shadow:
+        paths += list((LOG_DIR / "shadow").glob(f"*.{market}.json"))
+    for f in sorted(paths):
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             if d.get("market") == market:
                 out.append(d)
         except Exception:
             pass
-    out.sort(key=lambda item: str(item.get("as_of_date") or item.get("date") or ""))
+    out.sort(key=lambda item: (str(item.get("as_of_date") or item.get("date") or ""), item.get("generated_at", "")))
     return out
 
 
@@ -74,7 +113,7 @@ def overview():
     data = {}
     for mkt, m in MARKETS.items():
         pos, cash = _positions(mkt)
-        logs = _logs(mkt)
+        logs = _logs(mkt, include_shadow=True)
         trades = _trades(mkt, 30)
         last_log = logs[-1] if logs else None
         price_as_of = str((last_log or {}).get("as_of_date") or
@@ -200,17 +239,18 @@ def score():
                 rows.append({"date": start, "market": mkt, "symbol": p["symbol"],
                              "pred": p["direction"], "actual": act, "hit": ok,
                              "correct": ok, "confidence": p.get("confidence"),
+                             "variant": decision_log_variant(d),
                              "prompt_version": (sdk.get("prompt") or {}).get("version", "unversioned")})
-    return jsonify({"stats": stats, "rows": rows[-100:],
-                    "calibration": chronological_calibration(rows)})
+    return jsonify({"stats": stats, "rows": rows[-100:], **variant_calibration(rows)})
 
 
 @app.route("/api/experiments")
 def experiments():
     """只读返回实验注册表和真实历史新闻覆盖情况。"""
+    from evals.research import ResearchBook
     return jsonify({"runs": list_experiments(EXPERIMENT_DB, 30),
                     "comparisons": comparable_experiments(EXPERIMENT_DB),
-                    "news_dataset": dataset_summary(NEWS_DB)})
+                    "news_dataset": dataset_summary(NEWS_DB), "research": ResearchBook(EXPERIMENT_DB).summaries()})
 
 
 @app.route("/api/performance")
@@ -287,7 +327,8 @@ canvas { max-height:220px; }
 <body>
 <div class="toolbar"><div><h1>📈 双市场投资收益仪表盘</h1>
 <div class="sub">A股 + 美股 AI Agent 模拟交易 · 聚焦收益、变动、仓位与风险 · 仅为学习项目,不构成投资建议</div></div>
-<div class="toolbar-actions"><span id="updated" class="muted">等待刷新</span><button id="refreshBtn" onclick="load()">刷新数据</button></div></div>
+<div class="toolbar-actions"><a href="/trading" style="color:#70a3ff">模拟交易与真实股价 ↗</a><span id="updated" class="muted">等待刷新</span><button id="refreshBtn" onclick="load()">刷新数据</button></div></div>
+<div class="card" style="margin-bottom:16px"><h2>运行状态</h2><div id="operations">等待刷新</div></div>
 <div class="grid" id="root"><div class="card">加载中…</div></div>
 
 <template id="tpl">
@@ -353,6 +394,7 @@ const tone = (n) => Number(n) >= 0 ? "pos" : "neg";
 const marketCharts = {};
 
 async function load() {
+  loadOperations();
   const btn = document.getElementById("refreshBtn");
   const root = document.getElementById("root");
   btn.disabled = true; btn.textContent = "刷新中…";
@@ -469,6 +511,19 @@ async function load() {
   }
 }
 
+async function loadOperations() {
+  const box = document.getElementById("operations");
+  try {
+    const data = await (await fetch("/api/operations")).json();
+    const labels = {complete:"完成", skipped:"已跳过重复运行", failed:"失败", running:"运行中",
+                    interrupted:"已中断", awaiting_confirmation:"计划等待人工确认"};
+    const latest = Object.entries(data.latest || {});
+    box.innerHTML = latest.length ? latest.map(([market, run]) =>
+      `<div><b>${market === "cn" ? "A股" : "美股"}</b> · ${esc(labels[run.status] || run.status)} · ${esc(run.finished_at || run.started_at)}` +
+      (run.error ? `<div class="warning">${esc(run.error)}</div>` : "") + "</div>").join("") : "还没有运行记录";
+  } catch (error) { box.textContent = "运行状态暂时无法读取"; }
+}
+
 async function loadScore() {
   const btn = document.getElementById("scoreBtn");
   btn.disabled = true; btn.textContent = "计算中…";
@@ -494,6 +549,13 @@ async function loadScore() {
   html += `<div style="margin-top:10px"><b>置信度校准</b>：${cal.status === "complete"
     ? `未来验证 ${cal.test_count} 条 · 原始 Brier ${metric(cal.raw.brier_score)} / ECE ${metric(cal.raw.expected_calibration_error)} · 校准后 Brier ${metric(cal.calibrated.brier_score)} / ECE ${metric(cal.calibrated.expected_calibration_error)}`
     : esc(cal.message || "样本不足")}</div>`;
+  if (s.calibration_by_variant?.length > 1) {
+    for (const entry of s.calibration_by_variant) {
+      const c = entry.calibration;
+      html += `<div class=muted>${esc(entry.market)} / ${esc(entry.variant.prompt_version || "unversioned")}：` +
+        (c.status === "complete" ? `验证 ${c.test_count}条 · Brier ${metric(c.calibrated.brier_score)} / ECE ${metric(c.calibrated.expected_calibration_error)}` : esc(c.message)) + "</div>";
+    }
+  }
   document.getElementById("scoreBox").innerHTML = html;
   btn.disabled = false; btn.textContent = "重新计算";
 }
@@ -552,6 +614,17 @@ async function loadExperiments() {
       html += `<div class=muted>${esc(market)}：${esc(detail)}</div>`;
     }
     html += "</div>";
+    if (data.research?.length) {
+      const verdicts = {registered:"已注册", awaiting_data:"等待数据", awaiting_review:"等待复盘或核验",
+        insufficient_data:"样本不足", unverified_engineering:"工程验收，效果未验证", reject:"未达到标准",
+        not_comparable:"输入不可比", retain_for_forward_validation:"保留，需向前验证", retain_for_paper_validation:"保留，继续模拟"};
+      html += "<div style='margin-top:12px'><b>A股研究闭环</b></div>";
+      for (const study of data.research) {
+        html += `<div class=newsitem><b>${esc(study.name)}</b> · ${esc(verdicts[study.verdict] || study.verdict)}` +
+          `<div>${esc(study.hypothesis)}</div><div class=muted>已记录 ${study.attempt_count} 次运行 · ${esc(study.id)}</div>` +
+          (study.next_hypothesis ? `<div>下一步：${esc(study.next_hypothesis.recommended_action)}</div>` : "") + "</div>";
+      }
+    }
     html += `<div style="margin-top:6px"><b>严格可比 A/B 组</b>：${data.comparisons?.length || 0} 组` +
       `<span class=muted>（数据指纹相同且变体不同）</span></div>`;
     if (data.runs?.length) {

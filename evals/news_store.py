@@ -18,6 +18,7 @@ from typing import Iterable
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import NEWS_DB
+from servers.data_quality import event_time, event_available_date, market_close
 
 
 SCHEMA_VERSION = "news-events-v1"
@@ -61,17 +62,15 @@ def _database(db_path: Path | str = NEWS_DB):
         conn.close()
 
 
-def _published(value: object) -> str:
+def _published(value: object, market: str) -> str:
     text = str(value or "").strip().replace("Z", "+00:00")
     if not text:
         raise ValueError("新闻缺少 published_at")
     try:
-        parsed = datetime.fromisoformat(text)
+        parsed = event_time(text, market)
     except ValueError as exc:
         raise ValueError(f"无法解析 published_at={text!r}") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.isoformat(timespec="seconds")
+    return text if len(text) == 10 else parsed.isoformat(timespec="seconds")
 
 
 def _canonical_event(event: dict, market: str, data_quality: str) -> dict:
@@ -84,7 +83,7 @@ def _canonical_event(event: dict, market: str, data_quality: str) -> dict:
     source = " ".join(str(event.get("source") or "").split())[:100]
     if not symbol or not title or not source:
         raise ValueError("新闻必须包含 symbol、title、source")
-    published_at = _published(event.get("published_at"))
+    published_at = _published(event.get("published_at"), market)
     summary = " ".join(str(event.get("summary") or "").split())[:500]
     url = str(event.get("url") or "")[:1000]
     tags = sorted({str(tag)[:60] for tag in event.get("event_tags", []) if str(tag)})
@@ -149,10 +148,14 @@ def query_events(market: str, symbol: str, as_of_date: str, days: int = 3,
         rows = conn.execute(f"""
             SELECT * FROM news_events
             WHERE market=? AND symbol=?
-              AND substr(published_at,1,10) >= ? AND substr(published_at,1,10) <= ?
+              AND ((length(published_at)=10 AND published_at >= ? AND published_at < ?)
+                   OR (length(published_at)>10 AND julianday(published_at) >= julianday(?)
+                       AND julianday(published_at) <= julianday(?)))
               {quality_clause}
             ORDER BY published_at DESC, event_id ASC LIMIT ?
-        """, (market, symbol.upper(), start.isoformat(), end.isoformat(), max(1, int(limit)))).fetchall()
+        """, (market, symbol.upper(), start.isoformat(), end.isoformat(),
+              market_close(start.isoformat(), market).replace(hour=0, minute=0).isoformat(),
+              market_close(end.isoformat(), market).isoformat(), max(1, int(limit)))).fetchall()
     return [{
         "event_id": row["event_id"], "symbol": row["symbol"],
         "title": row["title"], "summary": row["summary"],
@@ -160,7 +163,23 @@ def query_events(market: str, symbol: str, as_of_date: str, days: int = 3,
         "url": row["url"], "sentiment_score": row["sentiment_score"],
         "event_tags": json.loads(row["event_tags_json"]),
         "data_quality": row["data_quality"], "untrusted_text": True,
+        "content_hash": row["content_hash"], "ingested_at": row["ingested_at"],
+        "first_seen_at": row["ingested_at"], "collected_at": row["ingested_at"],
     } for row in rows]
+
+
+def get_stored_event(event_id: str, market: str, as_of_date: str,
+                     db_path: Path | str = NEWS_DB) -> dict | None:
+    """按 ID 返回已落库且截止日可见的保存片段；不下载或声称保存了原文全文。"""
+    with _database(db_path) as conn:
+        row = conn.execute("SELECT symbol,published_at FROM news_events WHERE event_id=? AND market=?",
+                           (event_id, market)).fetchone()
+    if not row or event_time(row["published_at"], market) > market_close(as_of_date, market):
+        return None
+    day = event_time(row["published_at"], market).date()
+    days = max(1, (date.fromisoformat(as_of_date) - day).days + 1)
+    return next((item for item in query_events(market, row["symbol"], as_of_date, days,
+                 100000, db_path, include_synthetic=True) if item["event_id"] == event_id), None)
 
 
 def load_news_scores(market: str, start_date: str, end_date: str,
@@ -171,7 +190,7 @@ def load_news_scores(market: str, start_date: str, end_date: str,
     start_day = date.fromisoformat(start_date[:10])
     end_day = date.fromisoformat(end_date[:10])
     window_days = max(1, min(int(window_days), 30))
-    query_start = start_day - timedelta(days=window_days)
+    query_start = start_day - timedelta(days=window_days + 1)
     quality_clause = "" if include_synthetic else "AND data_quality <> 'synthetic'"
     with _database(db_path) as conn:
         rows = conn.execute(f"""
@@ -180,24 +199,35 @@ def load_news_scores(market: str, start_date: str, end_date: str,
               AND substr(published_at,1,10) >= ? AND substr(published_at,1,10) <= ?
               {quality_clause}
             ORDER BY published_at,event_id
-        """, (market, query_start.isoformat(), end_day.isoformat())).fetchall()
+        """, (market, query_start.isoformat(), (end_day + timedelta(days=1)).isoformat())).fetchall()
     scores: dict[tuple[str, str], float] = {}
+    attention: dict[str, dict[str, float]] = {}
+    used_rows = []
     for row in rows:
-        published_day = date.fromisoformat(row["published_at"][:10])
-        first_signal_day = max(start_day, published_day)
+        published_day = event_time(row["published_at"], market).date()
+        first_signal_day = max(start_day, event_available_date(row["published_at"], market))
         last_signal_day = min(end_day, published_day + timedelta(days=window_days))
+        if first_signal_day > last_signal_day:
+            continue
+        used_rows.append(row)
         signal_day = first_signal_day
         while signal_day <= last_signal_day:
             key = (signal_day.isoformat(), row["symbol"])
             scores[key] = round(scores.get(key, 0.0) + float(row["sentiment_score"]), 6)
+            daily_attention = attention.setdefault(signal_day.isoformat(), {})
+            daily_attention[row["symbol"]] = round(daily_attention.get(row["symbol"], 0.0)
+                                                  + abs(float(row["sentiment_score"])) + .25, 6)
             signal_day += timedelta(days=1)
-    fingerprint_input = "|".join(f"{row['event_id']}:{row['content_hash']}" for row in rows)
+    rows = used_rows
+    fingerprint_input = "close-cutoff-v2|" + "|".join(f"{row['event_id']}:{row['content_hash']}" for row in rows)
     fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
     qualities = sorted({row["data_quality"] for row in rows})
     manifest = {
         "schema_version": SCHEMA_VERSION, "market": market,
         "start_date": start_date[:10], "end_date": end_date[:10],
         "signal_window_days": window_days,
+        "timing_policy": "market-close-cutoff-v2; date-only usable next day",
+        "attention_by_day": attention,
         "event_count": len(rows), "qualities": qualities,
         "fingerprint": fingerprint,
         "data_quality": "historical_news" if rows else "no_historical_news",

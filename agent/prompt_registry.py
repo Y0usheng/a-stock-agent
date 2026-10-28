@@ -12,6 +12,10 @@ from config import DEFAULT_PROMPT_VERSION
 
 
 PROMPT_VERSIONS = {
+    "manager-long-v1": {
+        "description": "长期投资：三年论证、252日阶段观察、季度复核；区分核心补证与估值等待。",
+        "suffix": "",
+    },
     "manager-v1": {
         "description": "第二阶段基线：强制三专家顺序、风险终审与完整候选池预测。",
         "suffix": "",
@@ -40,11 +44,14 @@ def render_versioned_prompt(base_prompt: str, version: str | None = None) -> tup
     return rendered, prompt_manifest(rendered, resolved)
 
 
-def prompt_manifest(rendered_prompt: str, version: str | None = None) -> dict:
+def prompt_manifest(rendered_prompt: str, version: str | None = None,
+                    template_prompt: str | None = None) -> dict:
     resolved = resolve_prompt_version(version)
     manifest = {
         "version": resolved,
         "description": PROMPT_VERSIONS[resolved]["description"],
         "sha256": hashlib.sha256(rendered_prompt.encode("utf-8")).hexdigest(),
     }
+    if template_prompt is not None:
+        manifest["template_sha256"] = hashlib.sha256(template_prompt.encode("utf-8")).hexdigest()
     return manifest

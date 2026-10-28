@@ -107,3 +107,22 @@ def chronological_calibration(rows: list[dict], train_fraction: float = 0.7,
         "calibrated": calibration_metrics(calibrated),
         "method": "past-only histogram calibration with smoothed bins",
     }
+
+
+def variant_calibration(rows: list[dict]) -> dict:
+    """分市场/策略变体校准，避免把不同模型的小样本合成一个可校准大样本。"""
+    from evals.experiments import canonical_hash
+    groups = {}
+    for row in rows:
+        identity = canonical_hash({"market": row.get("market"), "variant": row.get("variant", {})})
+        groups.setdefault(identity, []).append(row)
+    entries = [{"market": group[0].get("market"), "variant": group[0].get("variant", {}),
+                "calibration": chronological_calibration(group)} for group in groups.values()]
+    if len(entries) == 1:
+        aggregate = entries[0]["calibration"]
+    elif not entries:
+        aggregate = chronological_calibration([])
+    else:
+        aggregate = {"status": "multiple_variants", "sample_count": len(rows),
+                     "message": "多个市场/策略变体分别校准，请查看各变体结果。"}
+    return {"calibration": aggregate, "calibration_by_variant": entries}

@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+import tempfile
 from unittest.mock import patch
 
 from config import MARKETS
@@ -45,13 +47,35 @@ class NewsServerTests(unittest.TestCase):
     def test_live_events_are_persisted_but_mock_events_are_not(self):
         event = news_server._event("600519", "公司回购", "2026-08-19T09:00:00",
                                    "provider")
-        with patch.object(news_server, "FORCE_OFFLINE", False), \
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(news_server, "NEWS_DB", Path(temp) / "news.db"), \
+             patch.object(news_server, "FORCE_OFFLINE", False), \
              patch.object(news_server, "_cn_live_news", return_value=[event]), \
-             patch.object(news_server, "query_events", return_value=[]), \
-             patch.object(news_server, "ingest_events") as ingest:
+             patch.object(news_server, "ingest_events", wraps=news_server.ingest_events) as ingest:
             result = news_server.get_symbol_news("600519", "2026-08-19", 3, 5)
+            lookup = news_server.get_news_evidence(event["event_id"], "2026-08-19")
+            self.assertTrue(lookup["ok"])
+            self.assertEqual(lookup["event"]["content_hash"], result[0]["content_hash"])
+            self.assertTrue(result[0]["first_seen_at"])
         self.assertEqual(result[0]["data_quality"], "live")
         ingest.assert_called_once()
+
+    def test_changed_news_content_is_not_returned_after_storage_rejects_it(self):
+        event = news_server._event("600519", "公司回购", "2026-08-19T09:00:00", "provider")
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(news_server, "NEWS_DB", Path(temp) / "news.db"), \
+             patch.object(news_server, "FORCE_OFFLINE", False), \
+             patch.object(news_server, "_cn_live_news", return_value=[event]):
+            news_server.get_symbol_news("600519", "2026-08-19", 3, 5)
+            news_server._cache.clear()
+            event["summary"] = "changed text, same event ID"
+            with self.assertRaises(ValueError):
+                news_server.get_symbol_news("600519", "2026-08-19", 3, 5)
+
+    def test_official_disclosure_reference_has_priority_over_media(self):
+        self.assertLess(news_server._disclosure_priority({"url": "https://static.cninfo.com.cn/a.pdf"}),
+                        news_server._disclosure_priority({"url": "https://example.org/latest-news"}))
+        self.assertEqual(news_server._disclosure_priority({"url": "https://cninfo.com.cn.example.org/fake"}), 1)
 
 
 if __name__ == "__main__":

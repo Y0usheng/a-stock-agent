@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 from config import MARKETS
 from servers.synthetic_data import random_walk_history
+from servers.data_quality import completed_history
 from servers.fundamentals_data import mock_fundamentals
 
 WATCHLIST = MARKETS["us"]["watchlist"]
@@ -64,13 +65,14 @@ def _fetch_history(symbol: str, days: int = 120) -> pd.DataFrame:
         try:
             # days 是交易日数量，按约 1.8 倍自然日留足周末和节假日。
             start = (datetime.now() - timedelta(days=max(days * 2, 365))).strftime("%Y-%m-%d")
-            df = yf.Ticker(symbol).history(start=start, auto_adjust=True)
+            df = yf.Ticker(symbol).history(start=start, auto_adjust=True, timeout=30)
             if len(df) > 0:
                 df = df.reset_index()
                 df["date"] = df["Date"].dt.strftime("%Y-%m-%d")
                 df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
                                         "Close": "close", "Volume": "volume"})
                 df = df[["date", "open", "high", "low", "close", "volume"]].round(2)
+                df = completed_history(df, "us")
                 df = df.tail(days).reset_index(drop=True)
                 _cache[key] = df
                 _data_source = "yfinance(真实数据)"

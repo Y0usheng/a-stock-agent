@@ -18,6 +18,7 @@ import sys
 import warnings
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 warnings.filterwarnings("ignore", message=r"Field 'lifespan' has an incomplete definition.*")
@@ -25,7 +26,8 @@ from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 from config import MARKETS, NEWS_DB
-from evals.news_store import ingest_events, query_events
+from agent.errors import safe_error
+from evals.news_store import get_stored_event, ingest_events, query_events
 
 if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
@@ -48,6 +50,19 @@ except Exception:
     yf = None
 
 mcp = FastMCP(f"stock-news-{MARKET}", log_level="ERROR")
+
+
+@mcp.tool()
+def market_discovery_feed(as_of_date: str, refresh: bool = True) -> dict:
+    """A股全局财经快讯及受控来源导入；与个股新闻分开，返回可追溯片段，不提供买入信号。"""
+    if MARKET != "cn":
+        raise ValueError("行业机会发现目前仅支持A股")
+    from agent.opportunities import OpportunityBook, refresh_feed
+    book = OpportunityBook()
+    receipt = refresh_feed(book) if refresh and not FORCE_OFFLINE else None
+    return {**book.feed(as_of_date), "refresh_receipt": receipt, "offline": FORCE_OFFLINE}
+
+
 _cache: dict[tuple, list[dict]] = {}
 
 POSITIVE = {
@@ -78,6 +93,11 @@ def _published(value) -> str:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value, timezone.utc).isoformat(timespec="seconds")
     text = str(value).strip().replace("Z", "+00:00")
+    if len(text) == 10:
+        try:
+            return date.fromisoformat(text).isoformat()
+        except ValueError:
+            return ""
     for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(text, fmt).isoformat(timespec="seconds")
@@ -90,12 +110,14 @@ def _published(value) -> str:
 
 
 def _within_window(item: dict, as_of_date: str, days: int) -> bool:
+    from servers.data_quality import event_time, market_close
     try:
-        published_day = date.fromisoformat(str(item.get("published_at", ""))[:10])
+        published = event_time(str(item.get("published_at", "")), MARKET)
+        published_day = published.date()
         end = date.fromisoformat(_day(as_of_date))
     except ValueError:
         return False
-    return end - timedelta(days=days) <= published_day <= end
+    return end - timedelta(days=days) <= published_day and published <= market_close(end.isoformat(), MARKET)
 
 
 def _score_text(text: str) -> tuple[float, list[str]]:
@@ -151,11 +173,11 @@ def _cn_live_news(symbol: str, as_of_date: str, days: int, limit: int) -> list[d
             symbol=symbol, market="沪深京", category="",
             start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"),
         )
-        for _, row in frame.tail(limit).iterrows():
+        for _, row in frame.head(limit).iterrows():
             out.append(_event(symbol, row.get("公告标题"), row.get("公告时间"),
                               "巨潮资讯", row.get("公告链接")))
     except Exception as exc:
-        print(f"[news-cn] 巨潮资讯 {symbol} 失败:{exc}", file=sys.stderr)
+        print(f"[news-cn] 巨潮资讯 {symbol} 失败:{safe_error(exc)}", file=sys.stderr)
     try:
         frame = ak.stock_news_em(symbol=symbol)
         for _, row in frame.head(limit).iterrows():
@@ -163,7 +185,7 @@ def _cn_live_news(symbol: str, as_of_date: str, days: int, limit: int) -> list[d
                               str(row.get("文章来源") or "东方财富"), row.get("新闻链接"),
                               row.get("新闻内容")))
     except Exception as exc:
-        print(f"[news-cn] 东方财富 {symbol} 失败:{exc}", file=sys.stderr)
+        print(f"[news-cn] 东方财富 {symbol} 失败:{safe_error(exc)}", file=sys.stderr)
     return out
 
 
@@ -171,8 +193,10 @@ def _alpha_news(symbol: str, as_of_date: str, days: int, limit: int) -> list[dic
     api_key = os.environ.get("ALPHAVANTAGE_API_KEY")
     if not api_key:
         return []
-    end = datetime.fromisoformat(_day(as_of_date)) + timedelta(days=1)
-    start = end - timedelta(days=days + 1)
+    from servers.data_quality import market_close
+    end = market_close(_day(as_of_date), MARKET).astimezone(timezone.utc)
+    start = (market_close(_day(as_of_date), MARKET).replace(hour=0, minute=0)
+             - timedelta(days=days)).astimezone(timezone.utc)
     params = urlencode({
         "function": "NEWS_SENTIMENT", "tickers": symbol,
         "time_from": start.strftime("%Y%m%dT%H%M"),
@@ -190,7 +214,12 @@ def _alpha_news(symbol: str, as_of_date: str, days: int, limit: int) -> list[dic
             external = float(external)
         except (TypeError, ValueError):
             external = None
-        out.append(_event(symbol, item.get("title"), item.get("time_published"),
+        published = _published(item.get("time_published"))
+        if not published:
+            continue
+        if datetime.fromisoformat(published).tzinfo is None:
+            published += "+00:00"  # Alpha Vantage NEWS_SENTIMENT 的时间为 UTC
+        out.append(_event(symbol, item.get("title"), published,
                           item.get("source") or "Alpha Vantage", item.get("url"),
                           item.get("summary"), external))
     return out
@@ -220,6 +249,12 @@ def _dedupe(events: list[dict], limit: int) -> list[dict]:
     return sorted(unique.values(), key=lambda item: item.get("published_at", ""), reverse=True)[:limit]
 
 
+def _disclosure_priority(item):
+    host = (urlsplit(item.get("url") or "").hostname or "").lower()
+    return 0 if any(host == domain or host.endswith("." + domain)
+                    for domain in ("cninfo.com.cn", "sse.com.cn", "szse.cn", "sec.gov")) else 1
+
+
 @mcp.tool()
 def get_symbol_news(symbol: str, as_of_date: str = "", days: int = 3,
                     limit: int = 8) -> list[dict]:
@@ -246,31 +281,44 @@ def get_symbol_news(symbol: str, as_of_date: str = "", days: int = 3,
             live = (_cn_live_news(symbol, as_of_date, days, limit) if MARKET == "cn"
                     else _alpha_news(symbol, as_of_date, days, limit) + _yahoo_news(symbol, limit))
         except Exception as exc:
-            print(f"[news-{MARKET}] {symbol} 实时新闻失败:{exc}", file=sys.stderr)
+            print(f"[news-{MARKET}] {symbol} 实时新闻失败:{safe_error(exc)}", file=sys.stderr)
             live = []
         # 严格按行情截面过滤，防止历史回放读取未来新闻。
         live = [item for item in live if _within_window(item, as_of_date, days)]
         for item in live:
             item["data_quality"] = "live"
         if live:
-            try:
-                ingest_events(live, MARKET, "live", NEWS_DB)
-            except Exception as exc:
-                print(f"[news-{MARKET}] 新闻落库失败:{exc}", file=sys.stderr)
-        events = stored + live
+            # 返回落库后的规范版本，保留内容哈希及首次采集时间。
+            # 同 event_id 内容变化或落库失败时，不采用未经登记的新文本。
+            ingest_events(live, MARKET, "live", NEWS_DB)
+            stored = query_events(MARKET, symbol, as_of_date, days, limit, NEWS_DB)
+        events = stored
     _cache[key] = _dedupe(events, limit)
     return _cache[key]
 
 
 @mcp.tool()
+def get_news_evidence(event_id: str, as_of_date: str) -> dict:
+    """回查本市场保存的新闻标题/摘要、原始链接、内容哈希和首次采集时间；不是全文验证。"""
+    item = get_stored_event(event_id, MARKET, date.fromisoformat(as_of_date).isoformat(), NEWS_DB)
+    if item is None or item["symbol"] not in UNIVERSE:
+        return {"ok": False, "error": "该事件未保存或在本市场截止时间后才发布"}
+    return {"ok": True, "content_scope": "title_and_excerpt", "event": item}
+
+
+@mcp.tool()
 def screen_news_candidates(as_of_date: str = "", limit: int = 8,
-                           days: int = 3) -> dict:
+                           days: int = 3, symbols: list[str] | None = None) -> dict:
     """扫描候选宇宙，按新闻关注度生成当日动态候选池；负面事件也会进入供风险审查。"""
     as_of_date = _day(as_of_date)
-    limit = max(1, min(int(limit), len(UNIVERSE)))
+    pool = list(UNIVERSE) if symbols is None else symbols
+    if not pool or len(pool) != len(set(pool)) or not set(pool) <= set(UNIVERSE):
+        raise ValueError("新闻扫描范围必须是无重复的受控股票池")
+    limit = max(1, min(int(limit), len(pool)))
     candidates = []
     all_sources = set()
-    for symbol, name in UNIVERSE.items():
+    for symbol in pool:
+        name = UNIVERSE[symbol]
         events = get_symbol_news(symbol, as_of_date, days, 5)
         valid = [item for item in events if item.get("event_id")]
         impact = sum(float(item.get("sentiment_score") or 0) for item in valid)
@@ -282,7 +330,7 @@ def screen_news_candidates(as_of_date: str = "", limit: int = 8,
         candidates.append({
             "symbol": symbol, "name": name, "news_score": round(impact, 3),
             "attention_score": round(attention, 3), "article_count": len(valid),
-            "top_events": valid[:3],
+            "top_events": sorted(valid, key=_disclosure_priority)[:3],
             "reason": "按事件强度进入候选；正负方向仍须由多角色与风控判断",
         })
     candidates.sort(key=lambda item: (-item["attention_score"], -abs(item["news_score"]), item["symbol"]))
@@ -292,7 +340,7 @@ def screen_news_candidates(as_of_date: str = "", limit: int = 8,
         "error": (None if live_available else
                   "新闻窗口内没有任何可验证实时事件，可能是提供商不可用；为安全起见停止交易"),
         "market": MARKET, "as_of_date": as_of_date, "offline": FORCE_OFFLINE,
-        "universe_size": len(UNIVERSE), "candidate_limit": limit,
+        "universe_size": len(pool), "candidate_limit": limit,
         "provider_strategy": ("AKShare:巨潮资讯+东方财富" if MARKET == "cn"
                               else "Alpha Vantage(可选)+yfinance/Yahoo"),
         "data_sources": sorted(source for source in all_sources if source),
