@@ -84,6 +84,8 @@ A股账本当前配置为100万元初始模拟现金、一手100股、T+1、单�
 
 ## 页面能看到什么
 
+已加入[GitHub Pages与CI发布链路](docs/PAGES_AND_CI.md)：本机运行并公开筛选后的报告，网页按日期查看；main经过PR、测试及保护规则更新。订阅登录与原始账本继续保留本机。
+
 本地入口为 `http://127.0.0.1:5000/trading`：
 
 - 新闻主题、原文片段、模型假设、反证及公司入选/未选理由。
@@ -129,6 +131,9 @@ codex login
 .venv\Scripts\python scripts/company_research.py tasks
 # 更新真实股价及HTML；首次可用--symbols指定研究对象
 .venv\Scripts\python scripts/refresh_trading_view.py --provider sina
+# 导出某日公开报告并触发GitHub Pages部署
+.venv\Scripts\python scripts/publish_reports.py export --date 2026-10-29
+.venv\Scripts\python scripts/publish_reports.py publish
 # 正式模拟入口：计划须按输出的完整哈希确认
 .venv\Scripts\python agent/run_daily.py --market cn
 # 本地研究闭环演示与回归

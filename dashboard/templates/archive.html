@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>长期模拟投资 · 每日记录</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#10141c;color:#e9edf5;font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif}header{max-width:1320px;margin:auto;padding:28px 32px 16px}.top{display:flex;justify-content:space-between;align-items:center;gap:16px}.eyebrow{font-size:11px;letter-spacing:2px;color:#70a3ff}h1{margin:4px 0;font-size:25px}p{margin:7px 0;color:#98a7bd}a{color:#8ab5ff;text-decoration:none}.controls{display:flex;align-items:center;gap:8px;margin-top:16px;flex-wrap:wrap}select,button{background:#181e29;color:#e9edf5;border:1px solid #39475d;border-radius:7px;padding:8px 13px;font:inherit}button{cursor:pointer}button:disabled{opacity:.35;cursor:default}.badge{font-size:12px;border:1px solid #39475d;border-radius:6px;padding:5px 10px;color:#98a7bd}.state{font-size:12px;color:#b6c9e4;min-height:22px}.warning{color:#edc37b}iframe{display:block;width:100%;height:calc(100vh - 220px);min-height:780px;border:0;background:#10141c}.empty{margin:40px auto;padding:30px;max-width:800px;border:1px solid #39475d;border-radius:12px;color:#98a7bd}footer{max-width:1320px;margin:auto;padding:10px 32px;color:#98a7bd;font-size:12px}@media(max-width:650px){header{padding:20px 18px 10px}.top{align-items:start}h1{font-size:21px}.badge{display:none}iframe{min-height:1050px}footer{padding:10px 18px}}
+</style></head><body>
+<header><div class="top"><div><div class="eyebrow">PUBLIC / PAPER INVESTING</div><h1>长期模拟投资 · 每日记录</h1></div><span class="badge">A股 · 虚拟资金 · 公开只读</span></div>
+<p>本机完成研究后发布结果。选择日期，查看判断、持仓、真实曲线与扣费收益。</p>
+<div class="controls"><label for="report-date">报告日期</label><button id="previous" aria-label="上一份报告">← 较早</button><select id="report-date" aria-label="选择报告日期"></select><button id="next" aria-label="下一份报告">较新 →</button><a id="permalink" href="?">分享此日期 ↗</a></div>
+<p id="report-state" class="state"></p></header>
+<div id="empty" class="empty" hidden>还没有发布真实研究报告。等待本机运行并发布后，这里会出现可选日期；不会自动生成模拟成交或历史收益。</div>
+<iframe id="report-frame" title="所选日期的模拟投资报告" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" hidden></iframe>
+<footer>行情日期、分析日期与报告日期分别显示。网页发布不会运行Agent或提交交易。 <a href="https://github.com/Y0usheng/a-stock-agent">项目与说明 ↗</a></footer>
+<script type="application/json" id="archive-data">__ARCHIVE_DATA__</script>
+<script>
+const archive=JSON.parse(document.getElementById('archive-data').textContent), reports=archive.reports;
+const select=document.getElementById('report-date'), frame=document.getElementById('report-frame'), state=document.getElementById('report-state');
+function show(date){
+ const i=reports.findIndex(r=>r.date===date);if(i<0)return;
+ const r=reports[i];select.value=r.date;frame.src=r.href;frame.hidden=false;
+ state.textContent=`行情截至 ${r.price_date||'未知'} · 最近公司分析 ${r.analysis_date||'无'} · ${r.mode}`+(r.price_date<r.date?' · 行情尚未更新至报告日':'');
+ state.className=r.price_date<r.date?'state warning':'state';
+ document.getElementById('previous').disabled=i===reports.length-1;document.getElementById('next').disabled=i===0;
+ const url=new URL(location.href);url.searchParams.set('date',r.date);history.replaceState(null,'',url);document.getElementById('permalink').href=url.href;
+}
+for(const report of reports){const option=document.createElement('option');option.value=report.date;option.textContent=report.date;select.appendChild(option);}
+select.onchange=()=>show(select.value);
+document.getElementById('previous').onclick=()=>{const i=reports.findIndex(r=>r.date===select.value);if(i+1<reports.length)show(reports[i+1].date);};
+document.getElementById('next').onclick=()=>{const i=reports.findIndex(r=>r.date===select.value);if(i>0)show(reports[i-1].date);};
+if(reports.length){const requested=new URLSearchParams(location.search).get('date');show(reports.some(r=>r.date===requested)?requested:reports[0].date);}
+else{document.getElementById('empty').hidden=false;select.disabled=true;document.getElementById('previous').disabled=true;document.getElementById('next').disabled=true;state.textContent='暂无公开记录';}
+</script></body></html>
