@@ -4,7 +4,7 @@
 
 它关注的不只是“今天该不该买”，还包括：**什么行业可能更有前景、哪些公司可能受益、依据是否可靠、什么价格满足建仓条件，以及持有后到底赚亏多少。** 所有交易只写入本地模拟账本，没有券商或真实资金接口。
 
-> 当前开发版在 [`codex/news-led-long-term-agent`](https://github.com/Y0usheng/a-stock-agent/tree/codex/news-led-long-term-agent)，对应 [PR #1](https://github.com/Y0usheng/a-stock-agent/pull/1)，尚未合并到 `main`。以下介绍对应此开发版。
+> 默认分支 [`main`](https://github.com/Y0usheng/a-stock-agent/tree/main) 提供当前长期投资模拟版本。完整改动与验证记录见 [PR #1](https://github.com/Y0usheng/a-stock-agent/pull/1)。
 
 ## 整个系统怎样运作
 
@@ -98,7 +98,7 @@ A股账本当前配置为100万元初始模拟现金、一手100股、T+1、单�
 当前以Windows、PowerShell和Python 3.12验证。先安装官方Codex CLI，使终端能够找到其可执行文件，按[官方认证说明](https://developers.openai.com/codex/auth)登录。
 
 ```powershell
-git clone --branch codex/news-led-long-term-agent https://github.com/Y0usheng/a-stock-agent.git
+git clone https://github.com/Y0usheng/a-stock-agent.git
 cd a-stock-agent
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
