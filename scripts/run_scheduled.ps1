@@ -8,7 +8,7 @@ param(
     [switch]$Publish
 )
 $ErrorActionPreference = 'Stop'
-if ($Publish -and ($Market -ne 'cn' -or $Offline -or $Mock)) { throw '公开发布只支持A股真实资料；不可发布离线或mock运行。' }
+if ($Publish -and ($Market -ne 'cn' -or $Offline -or $Mock -or $env:ASTOCK_OFFLINE -match '^(1|true|yes)$')) { throw '公开发布只支持A股真实资料；不可发布离线或mock运行。' }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $pythonPath)) { throw '请先安装项目虚拟环境。' }
