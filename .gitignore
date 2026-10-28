@@ -23,6 +23,8 @@ __pycache__/
 
 # 本地运行状态
 data/
+_site/
+published-data/
 logs/decisions/*.json
 logs/decisions/shadow/
 logs/decisions/pending/

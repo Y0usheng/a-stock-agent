@@ -84,6 +84,10 @@ A股账本当前配置为100万元初始模拟现金、一手100股、T+1、单�
 
 ## 页面能看到什么
 
+已加入[GitHub Pages与CI发布链路](docs/PAGES_AND_CI.md)：本机运行并公开筛选后的报告，网页按日期查看；main经过PR、测试及保护规则更新。订阅登录与原始账本继续保留本机。
+
+**[在线查看每日记录](https://y0usheng.github.io/a-stock-agent/)**，可选择日期并分享对应报告链接。
+
 本地入口为 `http://127.0.0.1:5000/trading`：
 
 - 新闻主题、原文片段、模型假设、反证及公司入选/未选理由。
@@ -129,6 +133,9 @@ codex login
 .venv\Scripts\python scripts/company_research.py tasks
 # 更新真实股价及HTML；首次可用--symbols指定研究对象
 .venv\Scripts\python scripts/refresh_trading_view.py --provider sina
+# 导出某日公开报告并触发GitHub Pages部署
+.venv\Scripts\python scripts/publish_reports.py export --date 2026-10-29
+.venv\Scripts\python scripts/publish_reports.py publish
 # 正式模拟入口：计划须按输出的完整哈希确认
 .venv\Scripts\python agent/run_daily.py --market cn
 # 本地研究闭环演示与回归
@@ -179,6 +186,6 @@ python scripts/check_repository_secrets.py --history
 
 数据和12家公司映射仅部分覆盖市场；公司公告全文核验尚未自动化，也没有独立标注的语义准确率。长期组合尚未积累足够的向前持仓记录，主题判断和流程测试不代表投资有效。
 
-当前通过231项回归（含4项凭据保护测试）；真实来源验收保存200条快讯、评价6个主题，未新增优先研究对象或模拟成交。新增主题区已通过接口和脚本检查，浏览器视觉验收仍待补。后续以对应提交的测试结果和项目状态为准。
+当前通过246项回归（含凭据保护与公开日期归档测试）；真实来源验收保存200条快讯、评价6个主题，未新增优先研究对象或模拟成交。两份公开报告由保存资料重建。后续以对应提交的测试结果和项目状态为准。
 
 本项目用于研究与模拟，不构成投资建议。
