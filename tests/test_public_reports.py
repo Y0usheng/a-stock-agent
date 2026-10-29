@@ -17,6 +17,16 @@ def rehash(report):
 
 
 class PublicReportTests(unittest.TestCase):
+    def test_learning_and_ai_policy_whitelist_excludes_code_parameters_and_order_ids(self):
+        view = sanitize_view({'status': 'ready', 'execution_policy': 'autonomous-paper-execution-v1',
+            'learning': {'version': 'paper-outcome-learning-v1', 'status': 'insufficient_data', 'mature_samples': 0,
+                'pending_samples': 2, 'strategy_status': 'waiting_for_mature_samples',
+                'active_parameters': {'private': True}, 'strategy_code': {'source': 'private'}},
+            'pending_orders': [{'execution_policy': 'autonomous-paper-execution-v1', 'status': 'confirmed', 'plan_hash': 'private'}]})
+        self.assertEqual(view['learning']['pending_samples'], 2)
+        self.assertNotIn('private', json.dumps(view))
+        self.assertEqual(view, sanitize_view(view))
+
     def setup_report(self, root, day="2026-10-26", *, ledger=None, logs=None):
         payload, original, original_logs = fixture()
         original["cash"] = 1_000_000.

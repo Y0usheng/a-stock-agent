@@ -13,6 +13,7 @@ from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
 DB = DATA_DIR / "paper_order_queue.db"
+AI_PAPER_POLICY = "autonomous-paper-execution-v1"
 
 
 def account_state(account):
@@ -71,7 +72,7 @@ class OrderQueue:
                 raise ValueError("待执行计划内容被改写")
         return rows
 
-    def stage(self, result, timing, account):
+    def stage(self, result, timing, account, *, auto_confirm=False):
         symbols = {row["symbol"] for row in result["decisions"]}
         validate_decision_result(result, "cn", expected_symbols=symbols)
         validate_risk_approval(result, "cn", symbols)
@@ -86,13 +87,18 @@ class OrderQueue:
             raise ValueError("研究完成时已过确认期限，不安排事后成交")
         payload = {"version": VERSION, "market": "cn", "result": deepcopy(result), "timing": deepcopy(timing),
                    "account_state": account_state(account)}
+        if auto_confirm:
+            if account.get("market") != "cn" or account.get("initial_cash") != MARKETS["cn"]["initial_cash"] or account.get("currency") != "CNY":
+                raise ValueError("AI自主执行仅限本项目A股模拟账本")
+            payload["execution_policy"] = AI_PAPER_POLICY
         identifier = canonical_hash(payload)
         with self.db() as conn:
             stamp = now().isoformat()
-            cursor = conn.execute("INSERT OR IGNORE INTO plans VALUES(?,?,?,NULL,NULL,NULL,?)",
-                         (identifier, json.dumps(payload, ensure_ascii=False, allow_nan=False), "awaiting_confirmation", stamp))
+            status = "confirmed" if auto_confirm else "awaiting_confirmation"
+            cursor = conn.execute("INSERT OR IGNORE INTO plans VALUES(?,?,?,?,NULL,NULL,?)",
+                         (identifier, json.dumps(payload, ensure_ascii=False, allow_nan=False), status, stamp if auto_confirm else None, stamp))
             if cursor.rowcount:
-                conn.execute("INSERT INTO events(plan_id,effective_at,recorded_at,status) VALUES(?,?,?,?)", (identifier, stamp, stamp, "awaiting_confirmation"))
+                conn.execute("INSERT INTO events(plan_id,effective_at,recorded_at,status) VALUES(?,?,?,?)", (identifier, stamp, stamp, status))
         return identifier
 
     def update(self, identifier, status, *, error=None, snapshot=None, approved_at=None, effective_at=None):
@@ -119,7 +125,8 @@ class OrderQueue:
                     summaries.append({"symbol": decision["symbol"], "action": decision["action"], "shares": decision["shares"],
                         "status": status, "execution_session": timing["execution_session"], "approval_deadline": timing["approval_deadline"],
                         "information_cutoff_at": timing["information_cutoff_at"], "state_recorded_at": recorded,
-                        "reference_price": decision["price"], "max_price_deviation_pct": timing["max_price_deviation_pct"]})
+                        "reference_price": decision["price"], "max_price_deviation_pct": timing["max_price_deviation_pct"],
+                        **({"execution_policy": row["payload"]["execution_policy"]} if row["payload"].get("execution_policy") else {})})
         return summaries
 
     def states_at(self, day):

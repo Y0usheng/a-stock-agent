@@ -189,6 +189,11 @@ def load_view(cache=PRICE_CACHE, log_dir=LOG_DIR, db=None):
         result["timing"] = deepcopy(logs[-1]["timing"])
         result["pending_orders"] = OrderQueue().public_state(now().date().isoformat())
         result["analysis_date"] = (logs[-1]["timing"].get("decision_at") or logs[-1]["timing"]["information_cutoff_at"])[:10]
+    if logs and logs[-1].get("execution_policy"):
+        result["execution_policy"] = logs[-1]["execution_policy"]
+    if logs and logs[-1].get("learning"):
+        from agent.learning import public_summary
+        result["learning"] = public_summary(logs[-1]["learning"])
     return result
 
 

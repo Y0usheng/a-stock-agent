@@ -58,11 +58,13 @@ def public_case(row):
 
 
 def sanitize_view(view):
-    result = pick(view, "status market as_of_date fetched_at source price_basis fingerprint tracking_start analysis_date analysis_policy message warnings limitations")
+    result = pick(view, "status market as_of_date fetched_at source price_basis fingerprint tracking_start analysis_date analysis_policy message warnings limitations execution_policy")
+    if "learning" in view:
+        result["learning"] = pick(view["learning"], "version status information_cutoff_at mature_samples pending_samples active_parameter_version strategy_status")
     if view.get("timing"):
         result["timing"] = pick(view["timing"], "version price_as_of_date information_cutoff_at decision_at execution_session execution_at approval_deadline order_type max_price_deviation_pct fill_model")
     if "pending_orders" in view:
-        result["pending_orders"] = [pick(row, "symbol action shares status execution_session approval_deadline information_cutoff_at state_recorded_at reference_price max_price_deviation_pct") for row in view["pending_orders"]]
+        result["pending_orders"] = [pick(row, "symbol action shares status execution_session approval_deadline information_cutoff_at state_recorded_at reference_price max_price_deviation_pct execution_policy") for row in view["pending_orders"]]
     result["portfolio"] = pick(view.get("portfolio", {}), "initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count journal_reconciled")
     result["portfolio_curve"] = [pick(row, "date total cumulative_return_pct") for row in view.get("portfolio_curve", [])]
     result["positions"] = [pick(row, "symbol name shares avg_cost last_buy_date last_price market_value unrealized_pnl") for row in view.get("positions", [])]
@@ -76,7 +78,7 @@ def sanitize_view(view):
         item["tracking_benchmark"] = [pick(point, "date return_pct") for point in row.get("tracking_benchmark", [])]
         item["trades"] = [trade(t) for t in row.get("trades", [])]
         item["decision"] = pick(row["decision"], "symbol name action shares price market_price reason") if row.get("decision") else None
-        item["prediction"] = pick(row["prediction"], "symbol direction horizon_days confidence rationale") if row.get("prediction") else None
+        item["prediction"] = pick(row["prediction"], "symbol direction horizon_days confidence calibrated_confidence calibration_version rationale") if row.get("prediction") else None
         item["investment_case"] = public_case(row.get("investment_case"))
         result["stocks"].append(item)
     result["research_tasks"] = [pick(row, "symbol status what_to_fetch review_by") for row in view.get("research_tasks", [])]
@@ -163,9 +165,14 @@ def make_report(day, *, cache=PRICE_CACHE, ledger=None, logs=None, book=None):
         view["timing"] = latest["timing"]
         view["pending_orders"] = OrderQueue().public_state(day)
         view["analysis_date"] = event_time(latest["timing"].get("decision_at") or latest["timing"]["information_cutoff_at"], "cn").date().isoformat()
+    if latest.get("execution_policy"):
+        view["execution_policy"] = latest["execution_policy"]
+    if latest.get("learning"):
+        from agent.learning import public_summary
+        view["learning"] = public_summary(latest["learning"])
     view = sanitize_view(view)
     mode = latest.get("execution_mode", "no_analysis")
-    if mode == "pending" and latest.get("queue_plan_hash"):
+    if mode in {"pending", "paper"} and latest.get("queue_plan_hash"):
         from agent.order_queue import OrderQueue
         state = OrderQueue().states_at(day).get(latest["queue_plan_hash"])
         if state:
@@ -198,8 +205,8 @@ def validate_report(report):
         if report[field] and date.fromisoformat(report[field]) > day:
             raise ValueError("报告含未来分析或价格")
     datetime.fromisoformat(report["published_at"])
-    numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence target_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct".split())
-    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing"}
+    numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence calibrated_confidence target_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct mature_samples pending_samples".split())
+    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing", "learning"}
     string_arrays = {"warnings", "limitations", "selected_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols"}
     def check(value, key="", depth=0):
         if depth > 12:
@@ -278,6 +285,8 @@ def build_site(source, output):
         view = report["view"]
         html = render_html(view).replace('<a href="/">账户总览 ↗</a>', '<span class="muted">公开只读快照</span>')
         label = {"shadow": "只分析 · 未成交建议", "paper": "模拟账本结果", "pending": "待本机确认 · 尚未成交", "scheduled": "已确认 · 等待未来收盘模拟成交", "cancelled": "计划已取消", "expired": "确认已过期", "blocked": "计划需本机复核", "no_analysis": "暂无公司分析"}.get(report["analysis_mode"], "研究结果")
+        if report["analysis_mode"] == "scheduled" and view.get("execution_policy") == "autonomous-paper-execution-v1":
+            label = "AI已排定 · 等待未来收盘模拟成交"
         banner = f'<div class="note">报告日期 {day} · 行情截至 {report["price_date"] or "未知"} · 最近分析 {report["analysis_date"] or "无"} · {label}<br>发布于 {escape(report["published_at"])}；历史报告由已保存输入重建，未补造新判断或成交。</div>'
         html = html.replace('<div id="error">', banner + '<div id="error">')
         target = output / "reports" / (day + ".html")

@@ -82,6 +82,8 @@ class AnalysisHost:
             data["investment_context"] = self.investment_context
         if getattr(self, "timing", None):
             data["timing"] = self.timing
+        if getattr(self, "learning_context", None):
+            data["learning_context"] = self.learning_context
         return deepcopy(data)
 
 

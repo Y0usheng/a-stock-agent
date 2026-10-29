@@ -37,8 +37,8 @@ python -m http.server 5101 --bind 127.0.0.1 --directory data/pages-preview
 .venv\Scripts\python scripts/publish_reports.py publish
 
 # 已有日循环的集成入口：正式模拟模式，随后刷新、导出并请求部署
-# 如存在买卖计划，仍需既有的本机计划确认，公开页不能代为批准。
-powershell -NoProfile -File scripts/run_scheduled.ps1 -Paper -Publish
+# 默认AI自主模拟，独立风控通过后自动排定未来收盘计划。
+pwsh -NoProfile -File scripts/run_scheduled.ps1 -Paper -Publish
 ```
 
 GitHub CLI需先通过正常登录配置本机仓库写入权限。发布脚本验证origin与目标仓库一致；不读取、打印或复制GitHub/ChatGPT登录文件。公开分支只允许指定格式的报告文件。离线或mock日循环不能启用 `-Publish`。已有分析确认命令见长期协议与模型接入文档。
@@ -53,6 +53,6 @@ GitHub CLI需先通过正常登录配置本机仓库写入权限。发布脚本�
 
 公开数据是静态快照，本机运行依赖电脑在线、登录有效、数据源可用及订阅额度；GitHub上不保管订阅身份。模式扫描与哈希并不独立证明资料真实性或投资有效。
 
-默认日循环已采用[收盘后研究与未来执行协议](AFTER_CLOSE_EXECUTION.md)：盘后形成的判断只能提出未来交易日的收盘价模拟计划，事前本机确认后再等待执行。公开页分别显示信息截止、判断完成、行情日和计划状态；原始PDF、跨页文本与确认哈希保留本机。后续研究失败时，发布步骤仍尝试展示此前已合法执行的计划，运行本身继续保留失败标记。
+默认日循环已采用[收盘后研究与未来执行协议](AFTER_CLOSE_EXECUTION.md)：盘后形成的判断只能提出未来交易日的收盘价模拟计划，AI计划经独立风控及宿主校验后自动排定。公开页分别显示信息截止、判断完成、行情日和计划状态；原始PDF、跨页文本及内部订单身份保留本机。后续研究失败时，发布步骤仍尝试展示此前已合法执行的计划，运行本身继续保留失败标记。历史v2报告保留当时的人工确认状态。
 
 GitHub官方说明：[Pages自定义工作流](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)、[受保护分支](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)。

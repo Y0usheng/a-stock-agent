@@ -100,6 +100,8 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
         research = context.get("investment_context", {})
         if context.get("timing"):
             result["timing"] = deepcopy(context["timing"])
+        if context.get("execution_policy"):
+            result["execution_policy"] = context["execution_policy"]
         selected = []
         for symbol in context["symbols"]:
             material_rows = [row for row in research.get("materials", []) if row["symbol"] == symbol]
@@ -121,6 +123,12 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
             auxiliary_gaps=deepcopy(research.get("auxiliary_gaps", [])), investment_policy=deepcopy(research.get("policy", {})))
         from agent.opportunities import compact_context
         result["opportunity_context"] = compact_context(context.get("news", {}).get("theme_discovery"), context["symbols"])
+        if context.get("learning_context"):
+            from agent.learning import public_summary
+            learning = context["learning_context"]
+            result["learning_context"] = {**public_summary(learning), "raw_metrics": learning["raw_metrics"],
+                "evaluation": learning["evaluation"], "recent_outcomes": [_pick(row, ("symbol", "date", "outcome_date", "predicted", "actual", "correct", "confidence", "price_return_pct")) for row in learning["recent_outcomes"]],
+                "boundary": learning["boundary"]}
     return result
 
 
@@ -138,12 +146,14 @@ def subscription_manifest(manifest: dict) -> dict:
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"],
             "long_instructions": LONG_INSTRUCTIONS, "schema": result_schema(RESULT_EVIDENCE_SCHEMA),
             "projection": "long-research-and-news-opportunities-v2"})
-    if value.get("version") == "manager-long-v2":
+    if value.get("version") in {"manager-long-v2", "manager-long-v3"}:
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"],
             "derived_evidence_schemas": [derived_link_schema(schema) for schema in (SUMMARY_SCHEMA, result_schema(RESULT_EVIDENCE_SCHEMA), RISK_SCHEMA)],
             "projection": "after-close-role-specific-context-v4", "claims_per_symbol": 1,
             "role_prompts": AFTER_CLOSE_ROLE_PROMPTS, "instructions": AFTER_CLOSE_EVIDENCE_INSTRUCTIONS,
             "technical_role": "host_quote_indicator_facts_v1"})
+    if value.get("version") == "manager-long-v3":
+        value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1"})
     return value
 
 
@@ -203,6 +213,8 @@ class SubscriptionRoles:
         if name in {"investment-manager", "risk-manager"}:
             payload["paper_account"] = context["paper_account"]
             payload["past_predictions"] = context["past_predictions"]
+            if context.get("learning_context"):
+                payload["learning_context"] = context["learning_context"]
         if self.long_term:
             payload.update(previous_cases=context["previous_cases"], research_tasks=context["research_tasks"],
                            auxiliary_gaps=context["auxiliary_gaps"], investment_policy=context["investment_policy"])
@@ -211,6 +223,8 @@ class SubscriptionRoles:
             if context.get("timing"):
                 payload["timing"] = context["timing"]
                 payload["timing_boundary"] = "行情日不等于决策时间。只使用information_cutoff_at前已观察资料；本轮只提出未来交易日收盘的限价模拟计划，参考价仍填冻结行情价。未确认、超时或超限不成交；估值和研究完成不等于已买入。"
+                if context.get("execution_policy") == "autonomous-paper-execution-v1":
+                    payload["timing_boundary"] = "仅限本机模拟盘；AI提出计划，独立风控和宿主检查通过后自动排定，无需逐笔人工确认。行情日不等于决策时间，禁止按已知收盘价回填成交。只能使用截止前已观察资料，按未来交易日真实收盘价加预设滑点费用处理，超时、超限或缺行情不成交。"
         if context.get("timing"):
             # Full frozen catalog remains in the audit. These IDs bind the compact role presentation.
             for record in payload["evidence"]:

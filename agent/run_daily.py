@@ -394,18 +394,18 @@ async def run_market(
                 or not set(research_symbols) <= allowed):
             raise ValueError("固定研究池仅支持A股shadow，代码不得重复或越界")
     host_instance = McpHost(market)
-    if prompt_version == "manager-long-v2":
+    if prompt_version in {"manager-long-v2", "manager-long-v3"}:
         if _offline_enabled():
             raise ValueError("收盘后真实队列不支持offline；离线回归请显式选择旧协议或测试替身")
         host_instance.price_provider = "sina"
     async with host_instance as host:
-        if prompt_version == "manager-long-v2":
+        if prompt_version in {"manager-long-v2", "manager-long-v3"}:
             if compare_prompts or compare_frameworks:
                 raise ValueError("新时序使用独立shadow首次输出，暂不混入旧协议同截面对照")
             from agent.after_close import run_after_close
             from agent.runtime import positive_env
             return await asyncio.wait_for(run_after_close(host, shadow=shadow, research_symbols=research_symbols,
-                                         approve_plan=approve_plan, reject_plan=reject_plan, force=force),
+                                         approve_plan=approve_plan, reject_plan=reject_plan, force=force, prompt_version=prompt_version),
                                          timeout=positive_env("ASTOCK_ANALYSIS_TIMEOUT", 600))
         m = MARKETS[market]
         print(f"\n{'='*12} {m['name']} ({market}) {'='*12}")
@@ -604,7 +604,7 @@ async def main():
     approval.add_argument("--approve-plan", help="恢复并确认指定完整哈希的 LangGraph 计划")
     approval.add_argument("--reject-plan", help="恢复并拒绝指定完整哈希的 LangGraph 计划")
     parser.add_argument("--preflight", action="store_true", help="只检查配置、登录方式和依赖，不调用模型或下单")
-    parser.add_argument("--compare-prompts", nargs="+", choices=["manager-v1", "manager-v2", "manager-long-v1", "manager-long-v2"],
+    parser.add_argument("--compare-prompts", nargs="+", choices=["manager-v1", "manager-v2", "manager-long-v1", "manager-long-v2", "manager-long-v3"],
                         help="共享只读截面依次运行多个 Prompt 版本，自动启用 --shadow")
     parser.add_argument(
         "--manager-provider", choices=["openai"], default=None,
@@ -615,8 +615,8 @@ async def main():
         help="风险经理模型提供商;统一 openai",
     )
     parser.add_argument(
-        "--prompt-version", choices=["manager-v1", "manager-v2", "manager-long-v1", "manager-long-v2"], default=None,
-        help="不可变 Prompt 版本；默认读取 ASTOCK_PROMPT_VERSION(manager-v1)",
+        "--prompt-version", choices=["manager-v1", "manager-v2", "manager-long-v1", "manager-long-v2", "manager-long-v3"], default=None,
+        help="不可变 Prompt 版本；默认读取 ASTOCK_PROMPT_VERSION，A股订阅默认manager-long-v3",
     )
     parser.add_argument("--force", action="store_true",
                         help="无成交时允许覆盖同日分析日志；已有成交时仍安全跳过")
