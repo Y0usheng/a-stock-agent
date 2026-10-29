@@ -175,7 +175,11 @@ class OpportunityBook:
                 "observed_return_pct": round((rows[-1]["close"] / rows[0]["close"] - 1) * 100, 4) if len(rows) >= 2 else None,
                 "status": "observing" if len(rows) >= 2 else "awaiting_future_prices",
                 "basis": "first_later_close_price_only_no_fill_no_costs_not_portfolio_return"})
-        return {"status": "ready", **snapshot, "forward_observations": observations}
+        result = {"status": "ready", **snapshot, "forward_observations": observations}
+        if snapshot.get("review_error"):
+            result.update(status="review_failed", message="新闻主题评审失败，未形成有效的新选股判断；不代表没有投资机会。")
+            result["selection_mode"] = "retain_prior_research" if snapshot.get("active_symbols") else "discovery_failed"
+        return result
 
 
 def refresh_feed(book=None):
@@ -336,6 +340,8 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
     # Existing research is retained if discovery is empty/fails, not silently replaced by the original seed.
     fallback = [symbol for symbol in previous_symbols if symbol in allowed][:limit] if not selected else []
     mode = "news_hypotheses" if selected else "retain_prior_research" if fallback else "no_qualified_opportunity"
+    if error:
+        mode = "retain_prior_research" if fallback or retained else "discovery_failed"
     active = list(dict.fromkeys(selected + retained + fallback))
     candidates = []
     for company in MARKETS["cn"]["candidate_universe"]:
@@ -349,6 +355,8 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
                   "受单轮新增研究数量上限限制" if state == "deferred_budget" else
                   "主题未获模型优先研究判断，或公司未被选为待核验受益方" if related else "本轮受控来源没有匹配主题，未评价公司长期价值")
         candidates.append({**company, "status": state, "reason": reason, "theme_ids": [x["theme_id"] for x in related]})
+        if error and state == "not_selected" and related:
+            candidates[-1].update(status="review_unavailable", reason="主题评审失败，本轮未评价公司的长期投资价值")
     snapshot = {"version": VERSION, "as_of_date": feed["as_of_date"], "cutoff": market_close(feed["as_of_date"], "cn").isoformat(),
         "coverage": feed.get("coverage"), "latest_fetch": feed.get("latest_fetch"), "themes": leads,
         "refresh_receipt": feed.get("refresh_receipt"),

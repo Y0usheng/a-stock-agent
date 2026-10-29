@@ -57,6 +57,8 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
         discovery = await discover(feed, held=held, previous_symbols=prior.get("active_symbols", []), book=book, limit=2)
         active = discovery["active_symbols"]
     if not active:
+        if discovery and discovery.get("review_error"):
+            raise RuntimeError("新闻主题评审失败，未形成有效候选判断；请检查发现记录，本轮未进入投资经理")
         print("没有通过长期筛选的新机会，保留发现记录，未产生计划或成交。")
         return {"status": "skipped", "reason": "no_qualified_opportunity"}
     host.active_symbols = active

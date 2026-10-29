@@ -37,7 +37,7 @@ const money=v=>v==null?'待估值':'¥'+number(v), signed=(v,suffix='')=>v==null
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const set=(id,value)=>$(id).textContent=value, tone=v=>v<0?'negative':'positive';let range=60;
 function drawOpportunities(){
- const o=data.opportunities;if(!o||o.status!=='ready'){set('opportunities',o?.message||'尚未运行行业机会发现。');return;}
+ const o=data.opportunities;if(!o||o.status!=='ready'){set('opportunities',o?.message||'尚未运行行业机会发现。');if(o?.status==='review_failed')set('opportunityState','评审失败 · 未形成新判断');return;}
  const labels={research_priority:'优先研究',monitor:'继续观察',risk:'风险线索',reject:'不进入长期研究'};
  const states={held:'保留持仓',selected_for_research:'入选研究',retained_research:'延续研究',deferred_budget:'本轮名额外',not_selected:'未入选'};
  set('opportunityState',`截至 ${o.as_of_date} · ${o.selected_symbols.length} 个新研究候选`);

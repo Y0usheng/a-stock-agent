@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from agent.model_access import resolve_model_access
 from agent.subscription import (SubscriptionClient, _run_codex, check_subscription_login,
-    parse_codex_events, subscription_environment, subscription_workspace)
+    parse_codex_events, protocol_progress, subscription_environment, subscription_workspace)
 from agent.subscription_roles import export_paper_context
 
 
@@ -81,11 +81,26 @@ class SubscriptionTests(unittest.TestCase):
 
     def test_timeout_terminates_process_and_returns_promptly(self):
         started = monotonic()
-        with subscription_workspace() as root, self.assertRaises(TimeoutError):
-            _run_codex([sys.executable, "-c", "import time; time.sleep(60)"],
-                       "fixed-test-text", root, .2, threading.Event())
+        with subscription_workspace() as root:
+            with self.assertRaises(TimeoutError):
+                _run_codex([sys.executable, "-u", "-c", "import json,time;print(json.dumps({'type':'thread.started'}));print(json.dumps({'type':'turn.started'}));time.sleep(60)"],
+                           "fixed-test-text", root, 1, threading.Event())
+            diagnostic = json.loads((root / "transport.json").read_text(encoding="utf-8"))
+            self.assertEqual(diagnostic["phase"], "turn.started")
+            self.assertEqual(diagnostic["event_counts"]["turn.started"], 1)
         self.assertLess(monotonic() - started, 5)
         self.assertFalse(root.exists())
+
+    def test_protocol_diagnostic_contains_no_messages_ids_or_unknown_fields(self):
+        with subscription_workspace() as root:
+            path = root / "output.jsonl"
+            entries = [{"type": "thread.started", "thread_id": "PRIVATE-CANARY"},
+                       {"type": "error", "message": "PRIVATE-CANARY", "token": "PRIVATE-CANARY"},
+                       {"type": "PRIVATE-CANARY"}, {"type": ["PRIVATE-CANARY"]}]
+            path.write_text("\n".join(json.dumps(row) for row in entries), encoding="utf-8")
+            result = protocol_progress(path)
+        self.assertEqual(result, {"phase": "error", "event_counts": {"thread.started": 1, "error": 1}})
+        self.assertNotIn("PRIVATE-CANARY", json.dumps(result))
 
     def test_paper_export_filters_free_text_and_preserves_recent_predictions(self):
         context = {"date": "2026-10-26", "symbols": ["AAPL"],
@@ -102,6 +117,20 @@ class SubscriptionTests(unittest.TestCase):
 
 
 class SubscriptionAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_diagnostic_survives_workspace_cleanup_without_claiming_usage(self):
+        client = SubscriptionClient("fixture")
+        client._login = {"binary": "fixture"}
+        def transport(args, prompt, root, timeout, cancelled):
+            (root / "transport.json").write_text(json.dumps({"phase": "turn.started", "event_counts": {"turn.started": 1}, "elapsed_seconds": 1}), encoding="utf-8")
+            raise TimeoutError("fixture timeout")
+        with patch("agent.subscription._run_codex", side_effect=transport):
+            with self.assertRaises(TimeoutError):
+                await client.complete("fixture", {}, role="opportunity-researcher")
+        report = client.report()
+        self.assertFalse(report["usage_complete"])
+        self.assertEqual(report["completed_calls"], 0)
+        self.assertEqual(report["transport_attempts"][0]["phase"], "turn.started")
+
     async def test_four_role_subscription_graph_and_resume_never_use_api(self):
         from agent.analysis import AnalysisHost
         from agent.graph_runner import run_agent_graph

@@ -300,6 +300,24 @@ class AfterCloseTests(unittest.TestCase):
         self.assertEqual(roles.client.requests_started, 0)
         self.assertEqual(roles.audit()["role_sources"]["technical-analyst"], "host_quote_indicator_facts_v1")
 
+    def test_discovery_timeout_stops_before_manager_instead_of_returning_skipped(self):
+        from agent.after_close import run_after_close
+        from unittest.mock import AsyncMock
+        context, _ = example(True)
+        class Host:
+            market = "cn"
+            async def call(self, name, args):
+                return {"candidate_snapshot": context["snapshot"], "trading_sessions": {"sessions": [DAY, NEXT], "fingerprint": None},
+                        "get_account": context["account"], "market_discovery_feed": {}}[name]
+        with patch("agent.after_close.make_timing", return_value=timing()), \
+             patch("agent.after_close.OpportunityBook") as book, \
+             patch("agent.after_close.discover", new=AsyncMock(return_value={"active_symbols": [], "review_error": "fixture timeout"})), \
+             patch("agent.after_close.run_agent_graph") as graph:
+            book.return_value.latest.return_value = {}
+            with self.assertRaisesRegex(RuntimeError, "新闻主题评审失败"):
+                asyncio.run(run_after_close(Host(), shadow=True))
+            graph.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
