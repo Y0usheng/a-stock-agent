@@ -1,5 +1,6 @@
 """只读模拟账本与真实股价的展示数据；不生成交易或回填虚构收益。"""
 from contextlib import closing
+from copy import deepcopy
 from datetime import date
 import json
 from pathlib import Path
@@ -18,7 +19,7 @@ PRICE_CACHE = DATA_DIR / "market_views" / "cn-prices.json"
 
 def analysis_logs(root=LOG_DIR):
     rows = []
-    for path in [*Path(root).glob("*.cn.json"), *(Path(root) / "shadow").glob("*.cn.json")]:
+    for path in [*Path(root).glob("*.cn.json"), *(Path(root) / "shadow").glob("*.cn.json"), *(Path(root) / "after_close").glob("*.cn.json")]:
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
             if row.get("market") == "cn" and not uses_synthetic_data(row):
@@ -77,6 +78,8 @@ def build_view(payload, ledger, logs, initial=1_000_000):
     latest = valid_logs[-1] if valid_logs else {}
     observations = [row.get("as_of_date") or row.get("date") for row in valid_logs]
     warnings = []
+    if latest.get("timing") and latest.get("execution_mode") == "shadow" and not latest.get("news_screen", {}).get("theme_discovery"):
+        warnings.append("本轮为固定受控公司样本验收，未由新闻发现流程自动入选；只分析，不代表建仓。")
     journal_ok = True
     actual_quantities = {row["symbol"]: row["shares"] for row in ledger["positions"]}
     try:
@@ -177,8 +180,15 @@ def load_view(cache=PRICE_CACHE, log_dir=LOG_DIR, db=None):
     if not Path(cache).exists():
         return {"status": "no_data", "message": "尚未缓存真实股价，请先运行 scripts/refresh_trading_view.py", "opportunities": OpportunityBook().view()}
     payload = json.loads(Path(cache).read_text(encoding="utf-8"))
-    result = build_view(payload, read_ledger(db or MARKETS["cn"]["db"]), analysis_logs(log_dir))
+    logs = analysis_logs(log_dir)
+    result = build_view(payload, read_ledger(db or MARKETS["cn"]["db"]), logs)
     result["opportunities"] = OpportunityBook().view(payload.get("histories", {}))
+    if logs and logs[-1].get("timing"):
+        from agent.order_queue import OrderQueue
+        from agent.trading_clock import now
+        result["timing"] = deepcopy(logs[-1]["timing"])
+        result["pending_orders"] = OrderQueue().public_state(now().date().isoformat())
+        result["analysis_date"] = (logs[-1]["timing"].get("decision_at") or logs[-1]["timing"]["information_cutoff_at"])[:10]
     return result
 
 

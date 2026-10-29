@@ -18,6 +18,44 @@ CLAIM_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "required": ["symbol", "claim", "evidence"]}
 
 
+def derived_link_schema(schema):
+    """Reference state is derived by the host, avoiding a redundant model field."""
+    value = deepcopy(schema)
+    def visit(node):
+        if isinstance(node, list):
+            for child in node:
+                visit(child)
+        elif isinstance(node, dict):
+            props = node.get("properties", {})
+            link = props.get("evidence")
+            if link and "supporting_ids" in link.get("properties", {}):
+                link["properties"].pop("status", None)
+                link["required"] = [key for key in link["required"] if key != "status"]
+            for child in node.values():
+                visit(child)
+    visit(value)
+    return value
+
+
+def restore_link_status(result):
+    """Derive citation presence only; do not change claims, IDs or research readiness."""
+    value = deepcopy(result)
+    def visit(node):
+        if isinstance(node, list):
+            for child in node:
+                visit(child)
+        elif isinstance(node, dict):
+            link = node.get("evidence")
+            if isinstance(link, dict) and isinstance(link.get("supporting_ids"), list):
+                if "status" in link:
+                    raise ValueError("新输出的引用状态只能由宿主计算")
+                link["status"] = "supported" if link["supporting_ids"] else "insufficient"
+            for child in node.values():
+                visit(child)
+    visit(value)
+    return value
+
+
 def cited_schema(schema, collections):
     schema = deepcopy(schema)
     for name in collections:
@@ -37,7 +75,7 @@ def _quality(row):
     return row.get("data_quality", "provider_observation")
 
 
-def _record(kind, row, market, day, allow_synthetic):
+def _record(kind, row, market, day, allow_synthetic, information_cutoff_at=None):
     payload = deepcopy(row)
     source = str(row.get("source") or row.get("data_source") or "").strip()
     url = str(row.get("url") or "")
@@ -67,7 +105,8 @@ def _record(kind, row, market, day, allow_synthetic):
         available = None
     if available is None and not (quality == "synthetic" and allow_synthetic):
         blockers.append("unknown_publication_time" if kind != "market_snapshot" else "unknown_quote_date")
-    if available is not None and available > market_close(day, market):
+    cutoff = event_time(information_cutoff_at, market) if information_cutoff_at else market_close(day, market)
+    if available is not None and available > cutoff:
         blockers.append("after_as_of_close")
     if kind in {"news", "company_document"} and quality != "synthetic":
         link = urlsplit(url)
@@ -82,15 +121,17 @@ def _record(kind, row, market, day, allow_synthetic):
     # 报告期/抓取日期都不能替代真实财报披露时间。
     if kind == "fundamentals" and not published and quality != "synthetic":
         issues.append("report_date_is_not_publication_time")
+    if information_cutoff_at and kind == "company_document" and "financials" in row.get("categories", []) and row.get("unit_context_present") is False:
+        blockers.append("financial_units_not_visible")
     first_seen = row.get("first_seen_at") or row.get("ingested_at")
-    if kind == "news" and not first_seen:
-        issues.append("first_seen_time_unknown")
+    if kind in {"news", "company_document"} and not first_seen:
+        (blockers if information_cutoff_at and quality != "synthetic" else issues).append("first_seen_time_unknown")
     if first_seen:
         try:
-            if event_time(first_seen, market) > market_close(day, market):
-                issues.append("observed_after_as_of_close")
+            if event_time(first_seen, market) > cutoff:
+                (blockers if information_cutoff_at else issues).append("observed_after_information_cutoff" if information_cutoff_at else "observed_after_as_of_close")
         except (ValueError, TypeError):
-            issues.append("invalid_first_seen_time")
+            (blockers if information_cutoff_at else issues).append("invalid_first_seen_time")
     host = (urlsplit(url).hostname or "").lower()
     disclosure = (host == "cninfo.com.cn" or host.endswith(".cninfo.com.cn") or
                   host == "sse.com.cn" or host.endswith(".sse.com.cn") or
@@ -125,12 +166,18 @@ def build_catalog(context, market, *, allow_synthetic=False):
                                     for event in candidate.get("top_events", [])])):
         for row in entries:
             if row.get("symbol") in symbols:
-                rows.append(_record(kind, row, market, day, allow_synthetic))
+                rows.append(_record(kind, row, market, day, allow_synthetic, context.get("timing", {}).get("information_cutoff_at")))
     rows = sorted({row["evidence_id"]: row for row in rows}.values(), key=lambda row: row["evidence_id"])
-    return {"version": EVIDENCE_VERSION, "market": market, "as_of_date": day,
+    catalog = {"version": EVIDENCE_VERSION, "market": market, "as_of_date": day,
         "visibility_policy": "publication_by_close; later_collection_is_explicitly_flagged",
         "semantic_support_verified": False, "allow_synthetic": allow_synthetic,
         "records": rows, "fingerprint": canonical_hash(rows)}
+    if context.get("timing"):
+        cutoff = event_time(context["timing"]["information_cutoff_at"], market)
+        if cutoff < market_close(day, market):
+            raise ValueError("收盘后协议的信息截止不能早于行情收盘")
+        catalog.update(information_cutoff_at=cutoff.isoformat(), visibility_policy="observed_and_published_by_information_cutoff; future_session_execution")
+    return catalog
 
 
 def validate_catalog(catalog):
@@ -139,7 +186,7 @@ def validate_catalog(catalog):
     ids = set()
     for record in catalog["records"]:
         expected = _record(record["kind"], record["payload"], catalog["market"],
-                           catalog["as_of_date"], catalog["allow_synthetic"])
+                           catalog["as_of_date"], catalog["allow_synthetic"], catalog.get("information_cutoff_at"))
         if record != expected or record["evidence_id"] in ids:
             raise ValueError("证据内容、时间、可用性或 ID 被改写")
         ids.add(record["evidence_id"])

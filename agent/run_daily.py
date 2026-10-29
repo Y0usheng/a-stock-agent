@@ -85,7 +85,7 @@ class McpHost:
         self._stack = AsyncExitStack()
         servers = {
             # 显式传递完整环境，确保 ASTOCK_OFFLINE/数据目录等运行参数进入子进程。
-            "market": (MARKETS[self.market]["market_server"], {**os.environ}),
+            "market": (MARKETS[self.market]["market_server"], {**os.environ, **({"ASTOCK_CN_PRICE_PROVIDER": self.price_provider} if getattr(self, "price_provider", None) else {})}),
             "news": (MARKETS[self.market]["news_server"],
                      {**os.environ, "ASTOCK_MARKET": self.market}),
             "account": (ACCOUNT_SERVER, {**os.environ, "ASTOCK_MARKET": self.market}),
@@ -393,7 +393,20 @@ async def run_market(
         if (market != "cn" or not shadow or not research_symbols or len(set(research_symbols)) != len(research_symbols)
                 or not set(research_symbols) <= allowed):
             raise ValueError("固定研究池仅支持A股shadow，代码不得重复或越界")
-    async with McpHost(market) as host:
+    host_instance = McpHost(market)
+    if prompt_version == "manager-long-v2":
+        if _offline_enabled():
+            raise ValueError("收盘后真实队列不支持offline；离线回归请显式选择旧协议或测试替身")
+        host_instance.price_provider = "sina"
+    async with host_instance as host:
+        if prompt_version == "manager-long-v2":
+            if compare_prompts or compare_frameworks:
+                raise ValueError("新时序使用独立shadow首次输出，暂不混入旧协议同截面对照")
+            from agent.after_close import run_after_close
+            from agent.runtime import positive_env
+            return await asyncio.wait_for(run_after_close(host, shadow=shadow, research_symbols=research_symbols,
+                                         approve_plan=approve_plan, reject_plan=reject_plan, force=force),
+                                         timeout=positive_env("ASTOCK_ANALYSIS_TIMEOUT", 600))
         m = MARKETS[market]
         print(f"\n{'='*12} {m['name']} ({market}) {'='*12}")
         print(f"已连接 MCP servers,共 {len(host.tools_schema)} 个工具")
@@ -591,7 +604,7 @@ async def main():
     approval.add_argument("--approve-plan", help="恢复并确认指定完整哈希的 LangGraph 计划")
     approval.add_argument("--reject-plan", help="恢复并拒绝指定完整哈希的 LangGraph 计划")
     parser.add_argument("--preflight", action="store_true", help="只检查配置、登录方式和依赖，不调用模型或下单")
-    parser.add_argument("--compare-prompts", nargs="+", choices=["manager-v1", "manager-v2", "manager-long-v1"],
+    parser.add_argument("--compare-prompts", nargs="+", choices=["manager-v1", "manager-v2", "manager-long-v1", "manager-long-v2"],
                         help="共享只读截面依次运行多个 Prompt 版本，自动启用 --shadow")
     parser.add_argument(
         "--manager-provider", choices=["openai"], default=None,
@@ -602,7 +615,7 @@ async def main():
         help="风险经理模型提供商;统一 openai",
     )
     parser.add_argument(
-        "--prompt-version", choices=["manager-v1", "manager-v2", "manager-long-v1"], default=None,
+        "--prompt-version", choices=["manager-v1", "manager-v2", "manager-long-v1", "manager-long-v2"], default=None,
         help="不可变 Prompt 版本；默认读取 ASTOCK_PROMPT_VERSION(manager-v1)",
     )
     parser.add_argument("--force", action="store_true",

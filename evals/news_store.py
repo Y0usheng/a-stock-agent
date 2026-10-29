@@ -139,11 +139,13 @@ def ingest_events(events: Iterable[dict], market: str, data_quality: str = "live
 
 def query_events(market: str, symbol: str, as_of_date: str, days: int = 3,
                  limit: int = 20, db_path: Path | str = NEWS_DB,
-                 include_synthetic: bool = False) -> list[dict]:
+                 include_synthetic: bool = False, information_cutoff_at: str | None = None) -> list[dict]:
     """按事件发布时间查询过去窗口，SQL 条件保证 published_at 不超过截面日。"""
-    end = date.fromisoformat(str(as_of_date)[:10])
+    cutoff = event_time(information_cutoff_at, market) if information_cutoff_at else market_close(str(as_of_date)[:10], market)
+    end = cutoff.date()
     start = end - timedelta(days=max(1, int(days)))
     quality_clause = "" if include_synthetic else "AND data_quality <> 'synthetic'"
+    observed_clause = "AND julianday(ingested_at) <= julianday(?)" if information_cutoff_at else ""
     with _database(db_path) as conn:
         rows = conn.execute(f"""
             SELECT * FROM news_events
@@ -152,10 +154,11 @@ def query_events(market: str, symbol: str, as_of_date: str, days: int = 3,
                    OR (length(published_at)>10 AND julianday(published_at) >= julianday(?)
                        AND julianday(published_at) <= julianday(?)))
               {quality_clause}
+              {observed_clause}
             ORDER BY published_at DESC, event_id ASC LIMIT ?
         """, (market, symbol.upper(), start.isoformat(), end.isoformat(),
               market_close(start.isoformat(), market).replace(hour=0, minute=0).isoformat(),
-              market_close(end.isoformat(), market).isoformat(), max(1, int(limit)))).fetchall()
+              cutoff.isoformat(), *([cutoff.isoformat()] if information_cutoff_at else []), max(1, int(limit)))).fetchall()
     return [{
         "event_id": row["event_id"], "symbol": row["symbol"],
         "title": row["title"], "summary": row["summary"],

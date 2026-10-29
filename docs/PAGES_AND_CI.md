@@ -53,4 +53,6 @@ GitHub CLI需先通过正常登录配置本机仓库写入权限。发布脚本�
 
 公开数据是静态快照，本机运行依赖电脑在线、登录有效、数据源可用及订阅额度；GitHub上不保管订阅身份。模式扫描与哈希并不独立证明资料真实性或投资有效。
 
+默认日循环已采用[收盘后研究与未来执行协议](AFTER_CLOSE_EXECUTION.md)：盘后形成的判断只能提出未来交易日的收盘价模拟计划，事前本机确认后再等待执行。公开页分别显示信息截止、判断完成、行情日和计划状态；原始PDF、跨页文本与确认哈希保留本机。后续研究失败时，发布步骤仍尝试展示此前已合法执行的计划，运行本身继续保留失败标记。
+
 GitHub官方说明：[Pages自定义工作流](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)、[受保护分支](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)。

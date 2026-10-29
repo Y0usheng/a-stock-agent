@@ -13,7 +13,7 @@ from evals.experiments import canonical_hash
 from servers.data_quality import event_time, market_close
 
 VERSION = "long-term-investment-v1"
-PROMPT_VERSION = "manager-long-v1"
+PROMPT_VERSION = "manager-long-v2"
 POLICY = {"version": VERSION, "thesis_horizon_years": 3, "evaluation_horizon_days": 252,
           "review_calendar_days": 90, "news_role": "thesis_change_monitor", "force_investment": False}
 CATEGORIES = {"business", "financials", "industry"}
@@ -21,7 +21,7 @@ RESEARCH_DB = DATA_DIR / "company_research.db"
 
 
 def is_long(version):
-    return version == PROMPT_VERSION
+    return version in {"manager-long-v1", PROMPT_VERSION}
 
 
 def case_variant(log):
@@ -50,7 +50,8 @@ def controlled_url(value):
 def select_materials(rows, limit=4):
     selected = []
     for category in ("business", "financials", "industry"):
-        row = next((item for item in rows if category in item["categories"]), None)
+        candidates = [item for item in rows if category in item["categories"]]
+        row = next((item for item in candidates if category == "financials" and item.get("document_type") == "annual"), None) or next(iter(candidates), None)
         if row is not None and row not in selected:
             selected.append(row)
     for row in rows:
@@ -220,14 +221,18 @@ class ResearchBook:
             conn.execute("INSERT INTO materials VALUES(?,?,?,?,?,?)", (identifier, value["symbol"], value["published_at"], value["first_seen_at"], expires, json.dumps(value, ensure_ascii=False)))
         return value
 
-    def snapshot(self, symbols, day, variant=None):
-        cutoff = market_close(day, "cn")
+    def snapshot(self, symbols, day, variant=None, information_cutoff_at=None):
+        cutoff = event_time(information_cutoff_at, "cn") if information_cutoff_at else market_close(day, "cn")
         materials, previous, tasks = [], [], []
         with self.db() as conn:
             for symbol in symbols:
                 rows = conn.execute("SELECT payload FROM materials WHERE symbol=? ORDER BY published_at DESC,id", (symbol,)).fetchall()
                 available = [json.loads(row[0]) for row in rows]
                 available = [row for row in available if event_time(row["published_at"], "cn") <= cutoff and row["expires_at"] >= day]
+                if information_cutoff_at:
+                    available = [row for row in available if event_time(row["first_seen_at"], "cn") <= cutoff]
+                    from agent.disclosures import VERSION as CAPTURE_VERSION
+                    available = [row for row in available if not row.get("pdf_sha256") or row.get("capture_protocol") == CAPTURE_VERSION]
                 available = select_materials(available, 8)
                 materials += available[:8]
                 query = "SELECT payload,day,log_hash FROM cases WHERE symbol=? AND day<?"
@@ -259,12 +264,16 @@ class ResearchBook:
                     task["status"] = "overdue" if day > task["review_by"] else old_task[1]
                     tasks.append(task)
         return {"policy": POLICY, "as_of_date": day, "materials": materials, "previous_cases": previous, "tasks": tasks,
-                "visibility_policy": "published_by_close; first_seen_retained; imports_not_independently_verified"}
+                "visibility_policy": "published_and_first_seen_by_information_cutoff; imports_not_independently_verified" if information_cutoff_at else "published_by_close; first_seen_retained; imports_not_independently_verified"}
 
     def save(self, log, variant):
         from agent.contracts import validate_decision_result
         from agent.evidence import validate_evidence_audit
-        if log.get("market") != "cn" or log.get("execution_mode") not in {"shadow", "paper"}:
+        valid_mode = log.get("execution_mode") in {"shadow", "paper"}
+        if log.get("execution_mode") == "pending" and log.get("timing", {}).get("version") == "after-close-next-session-v1":
+            from agent.order_queue import OrderQueue
+            valid_mode = any(row["id"] == log.get("queue_plan_hash") for row in OrderQueue().rows())
+        if log.get("market") != "cn" or not valid_mode:
             raise ValueError("研究论证仅接收A股原始shadow/模拟盘日志")
         validate_decision_result(log, "cn", expected_symbols={row["symbol"] for row in log["decisions"]})
         validate_evidence_audit(log)
@@ -305,7 +314,7 @@ async def prepare_context(host, day, symbols, variant=None, book=None):
     """先固定资料，再调用模型；历史优先复用可核验本地缓存。"""
     from evals.price_data import normalize_history
     import pandas as pd
-    research = (book or ResearchBook()).snapshot(symbols, day, variant)
+    research = (book or ResearchBook()).snapshot(symbols, day, variant, getattr(host, "timing", {}).get("information_cutoff_at"))
     histories, gaps = [], []
     cache_path = DATA_DIR / "market_views" / "cn-prices.json"
     cached = {}

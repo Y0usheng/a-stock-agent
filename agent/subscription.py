@@ -211,6 +211,7 @@ class SubscriptionClient:
             value is not None for value in reasons) else None
         return {**self.settings, **usage, "requests_started": self.requests_started,
                 "completed_calls": len(self.calls),
+                "usage_complete": self.requests_started == len(self.calls),
                 "total_tokens": usage["input_tokens"] + usage["output_tokens"],
                 "budget_enforcement": "completed_calls_and_next_call_gate"}
 
@@ -222,6 +223,11 @@ class SubscriptionClient:
             report = self.report()
             if self.requests_started >= self.settings["request_limit"] or report["total_tokens"] >= self.settings["token_limit"]:
                 raise RuntimeError("订阅调用达到本轮预算，停止后续调用")
+            # Codex has request overhead beyond our prompt. Do not start another four-role
+            # request when almost no budget remains; completed usage is still checked below.
+            reserve = min(8000, self.settings["token_limit"] // 4)
+            if self.settings["request_limit"] == 4 and self.calls and self.settings["token_limit"] - report["total_tokens"] < reserve:
+                raise RuntimeError("剩余订阅预算不足以保留下一角色开销，停止后续调用")
             if self._login is None:
                 self._login = await asyncio.to_thread(check_subscription_login)
             with subscription_workspace() as root:
@@ -244,6 +250,8 @@ class SubscriptionClient:
                     args += ["--config", f"{key}=" + ("{}" if value == {} else json.dumps(value, ensure_ascii=False))]
                 args.append("-")
                 self.requests_started += 1
+                started = monotonic()
+                print(f"订阅研究 {self.requests_started}/{self.settings['request_limit']}：{role} 开始（限时{self.settings['request_timeout']}秒）", flush=True)
                 cancelled = threading.Event()
                 task = asyncio.create_task(asyncio.to_thread(_run_codex, args, prompt, root,
                     self.settings["request_timeout"], cancelled))
@@ -259,6 +267,7 @@ class SubscriptionClient:
                     raise
                 result, usage = parse_codex_events(stdout)
                 self.calls.append({"role": role, **usage})
+                print(f"订阅研究：{role} 完成，耗时{monotonic()-started:.1f}秒，累计{self.report()['total_tokens']} tokens", flush=True)
                 if self.report()["total_tokens"] > self.settings["token_limit"]:
                     raise RuntimeError(f"订阅已完成调用超过预算，停止采用计划；用量 {self.report()['total_tokens']}")
                 return result

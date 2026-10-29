@@ -26,7 +26,8 @@ Push-Location -LiteralPath $projectRoot
 try {
     & $pythonPath @runArguments *> $runLogPath
     $runExitCode = $LASTEXITCODE
-    if ($Publish -and $runExitCode -eq 0) {
+    $analysisExitCode = $runExitCode
+    if ($Publish) {
         & $pythonPath scripts/refresh_trading_view.py --provider sina >> $runLogPath 2>&1
         if ($LASTEXITCODE -ne 0) { Write-Warning '真实股价刷新失败，将保留旧缓存并在报告中标明行情日期。' }
         $publicationDay = & $pythonPath -c "from datetime import datetime;from servers.data_quality import market_zone;print(datetime.now(market_zone('cn')).date().isoformat())"
@@ -35,6 +36,7 @@ try {
             & $pythonPath scripts/publish_reports.py publish >> $runLogPath 2>&1
         }
         $runExitCode = $LASTEXITCODE
+        if ($analysisExitCode -ne 0) { $runExitCode = $analysisExitCode }
     }
 } finally { Pop-Location }
 Write-Output "运行日志: $runLogPath"

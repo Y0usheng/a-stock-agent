@@ -43,6 +43,20 @@ class PublicReportTests(unittest.TestCase):
             self.assertIsNone(report["view"]["stocks"][0]["decision"])
             self.assertEqual(report["view"]["stocks"][0]["series"][-1]["date"], "2026-10-23")
 
+    def test_after_close_decision_is_not_backfilled_to_its_older_price_date(self):
+        _, _, logs = fixture()
+        logs[0]["timing"] = {"version": "after-close-next-session-v1", "price_as_of_date": "2026-10-26",
+            "information_cutoff_at": "2026-10-27T10:00:00+08:00", "decision_at": "2026-10-27T10:05:00+08:00",
+            "execution_session": "2026-10-27", "approval_deadline": "2026-10-27T14:55:00+08:00", "max_price_deviation_pct": .02}
+        with subscription_workspace() as root:
+            old = self.setup_report(root, "2026-10-26", logs=logs)
+            self.assertIsNone(old["analysis_date"])
+            self.assertNotIn("timing", old["view"])
+            current = self.setup_report(root, "2026-10-27", logs=logs)
+            self.assertEqual(current["analysis_date"], "2026-10-27")
+            self.assertEqual(current["price_date"], "2026-10-26")
+            self.assertNotIn("queue_plan_hash", json.dumps(current))
+
     def test_old_date_replays_only_then_existing_trades_and_fees(self):
         ledger = {"cash": 999950., "positions": [{"symbol": "300750", "shares": 5}], "exists": True,
             "trades": [{"symbol": "300750", "trade_date": "2026-10-20", "action": "BUY", "shares": 10, "price": 10., "fee": 5.},

@@ -14,7 +14,7 @@ from evals.experiments import canonical_hash
 from evals.trading_view import PRICE_CACHE, _journal, analysis_logs, build_view, read_ledger, render_html
 from evals.metrics import uses_synthetic_data
 from scripts.check_repository_secrets import scan_content
-from servers.data_quality import market_zone
+from servers.data_quality import market_zone, event_time, market_close
 
 VERSION = "public-paper-report-v1"
 REPORT_FILE = re.compile(r"\d{4}-\d{2}-\d{2}\.[0-9a-f]{16}\.json")
@@ -59,6 +59,10 @@ def public_case(row):
 
 def sanitize_view(view):
     result = pick(view, "status market as_of_date fetched_at source price_basis fingerprint tracking_start analysis_date analysis_policy message warnings limitations")
+    if view.get("timing"):
+        result["timing"] = pick(view["timing"], "version price_as_of_date information_cutoff_at decision_at execution_session execution_at approval_deadline order_type max_price_deviation_pct fill_model")
+    if "pending_orders" in view:
+        result["pending_orders"] = [pick(row, "symbol action shares status execution_session approval_deadline information_cutoff_at state_recorded_at reference_price max_price_deviation_pct") for row in view["pending_orders"]]
     result["portfolio"] = pick(view.get("portfolio", {}), "initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count journal_reconciled")
     result["portfolio_curve"] = [pick(row, "date total cumulative_return_pct") for row in view.get("portfolio_curve", [])]
     result["positions"] = [pick(row, "symbol name shares avg_cost last_buy_date last_price market_value unrealized_pnl") for row in view.get("positions", [])]
@@ -118,7 +122,10 @@ def report_days(logs=None, book=None):
     logs = saved_logs() if logs is None else logs
     book = book or OpportunityBook()
     snapshots = book._read("SELECT payload FROM snapshots ORDER BY rowid")
-    return sorted({row.get("as_of_date") or row["date"] for row in logs} | {row["as_of_date"] for row in snapshots})
+    def day(row):
+        timing = row.get("timing", {})
+        return str(timing.get("decision_at") or timing.get("information_cutoff_at") or row.get("information_cutoff_at") or row.get("as_of_date") or row["date"])[:10]
+    return sorted({day(row) for row in logs} | {day(row) for row in snapshots})
 
 
 def make_report(day, *, cache=PRICE_CACHE, ledger=None, logs=None, book=None):
@@ -134,12 +141,14 @@ def make_report(day, *, cache=PRICE_CACHE, ledger=None, logs=None, book=None):
     payload["fingerprint"] = canonical_hash(payload["histories"])
     logs = saved_logs() if logs is None else logs
     logs = [row for row in logs if not uses_synthetic_data(row) and (row.get("as_of_date") or row.get("date", "")) <= day]
+    cutoff = market_close(day, "cn").replace(hour=23, minute=59, second=59)
+    logs = [row for row in logs if not row.get("timing") or event_time(row["timing"].get("decision_at") or row["timing"]["information_cutoff_at"], "cn") <= cutoff]
     logs.sort(key=lambda row: (row.get("as_of_date") or row.get("date", ""), {"paper": 2, "pending": 1}.get(row.get("execution_mode"), 0), row.get("generated_at", "")))
     latest = logs[-1] if logs else {}
     ledger = ledger_as_of(read_ledger() if ledger is None else ledger, day)
     view = build_view(payload, ledger, logs)
     book = book or OpportunityBook()
-    snapshots = [row for row in book._read("SELECT payload FROM snapshots ORDER BY rowid") if row["as_of_date"] <= day]
+    snapshots = [row for row in book._read("SELECT payload FROM snapshots ORDER BY rowid") if row["as_of_date"] <= day and (not row.get("information_cutoff_at") or event_time(row.get("discovery_decided_at") or row["information_cutoff_at"], "cn") <= cutoff)]
     if snapshots:
         # Share the existing forward-observation implementation with an as-of-only source.
         class AsOfBook:
@@ -149,8 +158,18 @@ def make_report(day, *, cache=PRICE_CACHE, ledger=None, logs=None, book=None):
                 return snapshots
         view["opportunities"] = OpportunityBook.view(AsOfBook(), payload["histories"])
     view["research_tasks"] = []  # Current task status is not a historical snapshot.
+    if latest.get("timing"):
+        from agent.order_queue import OrderQueue
+        view["timing"] = latest["timing"]
+        view["pending_orders"] = OrderQueue().public_state(day)
+        view["analysis_date"] = event_time(latest["timing"].get("decision_at") or latest["timing"]["information_cutoff_at"], "cn").date().isoformat()
     view = sanitize_view(view)
     mode = latest.get("execution_mode", "no_analysis")
+    if mode == "pending" and latest.get("queue_plan_hash"):
+        from agent.order_queue import OrderQueue
+        state = OrderQueue().states_at(day).get(latest["queue_plan_hash"])
+        if state:
+            mode = {"confirmed": "scheduled", "executing": "scheduled", "filled": "paper", "partially_filled": "paper", "cancelled": "cancelled", "rejected": "cancelled", "expired": "expired", "blocked": "blocked"}.get(state[0], "pending")
     base = {"schema": VERSION, "report_date": day, "analysis_mode": mode,
         "analysis_date": view.get("analysis_date"), "price_date": view.get("as_of_date"),
         "reconstruction": "saved_inputs_and_dated_simulated_trades_not_contemporaneous_publication",
@@ -166,7 +185,7 @@ def validate_report(report):
         raise ValueError("公开报告字段不符合白名单")
     if report["schema"] != VERSION or report["view"] != sanitize_view(report["view"]):
         raise ValueError("公开视图包含非公开字段")
-    if report["analysis_mode"] not in {"shadow", "paper", "pending", "no_analysis"}:
+    if report["analysis_mode"] not in {"shadow", "paper", "pending", "scheduled", "cancelled", "expired", "blocked", "no_analysis"}:
         raise ValueError("未知分析模式")
     if report["source_dataset_hash"] is not None and (not isinstance(report["source_dataset_hash"], str) or not re.fullmatch(r"[0-9a-f]{64}", report["source_dataset_hash"])):
         raise ValueError("来源身份字段无效")
@@ -179,8 +198,8 @@ def validate_report(report):
         if report[field] and date.fromisoformat(report[field]) > day:
             raise ValueError("报告含未来分析或价格")
     datetime.fromisoformat(report["published_at"])
-    numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence target_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct".split())
-    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment"}
+    numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence target_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct".split())
+    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing"}
     string_arrays = {"warnings", "limitations", "selected_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols"}
     def check(value, key="", depth=0):
         if depth > 12:
@@ -258,7 +277,7 @@ def build_site(source, output):
     for day, report in sorted(latest.items(), reverse=True):
         view = report["view"]
         html = render_html(view).replace('<a href="/">账户总览 ↗</a>', '<span class="muted">公开只读快照</span>')
-        label = {"shadow": "只分析 · 未成交建议", "paper": "模拟账本结果", "pending": "待本机确认 · 尚未成交", "no_analysis": "暂无公司分析"}.get(report["analysis_mode"], "研究结果")
+        label = {"shadow": "只分析 · 未成交建议", "paper": "模拟账本结果", "pending": "待本机确认 · 尚未成交", "scheduled": "已确认 · 等待未来收盘模拟成交", "cancelled": "计划已取消", "expired": "确认已过期", "blocked": "计划需本机复核", "no_analysis": "暂无公司分析"}.get(report["analysis_mode"], "研究结果")
         banner = f'<div class="note">报告日期 {day} · 行情截至 {report["price_date"] or "未知"} · 最近分析 {report["analysis_date"] or "无"} · {label}<br>发布于 {escape(report["published_at"])}；历史报告由已保存输入重建，未补造新判断或成交。</div>'
         html = html.replace('<div id="error">', banner + '<div id="error">')
         target = output / "reports" / (day + ".html")

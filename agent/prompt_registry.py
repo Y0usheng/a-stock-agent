@@ -12,6 +12,10 @@ from config import DEFAULT_PROMPT_VERSION
 
 
 PROMPT_VERSIONS = {
+    "manager-long-v2": {
+        "description": "收盘后真实信息截止、次交易日收盘限价模拟计划及受控PDF自动补证。",
+        "suffix": "",
+    },
     "manager-long-v1": {
         "description": "长期投资：三年论证、252日阶段观察、季度复核；区分核心补证与估值等待。",
         "suffix": "",

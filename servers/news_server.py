@@ -53,14 +53,15 @@ mcp = FastMCP(f"stock-news-{MARKET}", log_level="ERROR")
 
 
 @mcp.tool()
-def market_discovery_feed(as_of_date: str, refresh: bool = True) -> dict:
+def market_discovery_feed(as_of_date: str, refresh: bool = True, after_close: bool = False) -> dict:
     """A股全局财经快讯及受控来源导入；与个股新闻分开，返回可追溯片段，不提供买入信号。"""
     if MARKET != "cn":
         raise ValueError("行业机会发现目前仅支持A股")
     from agent.opportunities import OpportunityBook, refresh_feed
     book = OpportunityBook()
     receipt = refresh_feed(book) if refresh and not FORCE_OFFLINE else None
-    return {**book.feed(as_of_date), "refresh_receipt": receipt, "offline": FORCE_OFFLINE}
+    from agent.trading_clock import now
+    return {**book.feed(as_of_date, information_cutoff_at=now().isoformat() if after_close else None), "refresh_receipt": receipt, "offline": FORCE_OFFLINE}
 
 
 _cache: dict[tuple, list[dict]] = {}
@@ -304,6 +305,38 @@ def get_news_evidence(event_id: str, as_of_date: str) -> dict:
     if item is None or item["symbol"] not in UNIVERSE:
         return {"ok": False, "error": "该事件未保存或在本市场截止时间后才发布"}
     return {"ok": True, "content_scope": "title_and_excerpt", "event": item}
+
+
+@mcp.tool()
+def after_close_symbol_news(symbols: list[str], as_of_date: str) -> dict:
+    """收盘后协议：有界读取个股新闻并以实际采集时间冻结；公告全文由独立采集器处理。"""
+    if MARKET != "cn" or FORCE_OFFLINE or not symbols or not set(symbols) <= set(UNIVERSE):
+        raise ValueError("只支持真实A股受控研究池")
+    from agent.trading_clock import bounded_requests, now
+    sources, errors = [], []
+    for symbol in symbols:
+        try:
+            with bounded_requests(10):
+                frame = ak.stock_news_em(symbol=symbol)
+            rows = [_event(symbol, row.get("新闻标题"), row.get("发布时间"), str(row.get("文章来源") or "东方财富"),
+                           row.get("新闻链接"), row.get("新闻内容")) for _, row in frame.head(5).iterrows()]
+            rows = [row for row in rows if row.get("published_at") and event_time_cn(row["published_at"]) <= now()]
+            if rows:
+                ingest_events(rows, MARKET, "live", NEWS_DB)
+                sources.append("东方财富个股新闻")
+        except Exception:
+            errors.append({"symbol": symbol, "error": "symbol_news_unavailable"})
+    cutoff = now().isoformat()
+    candidates = [{"symbol": symbol, "name": UNIVERSE[symbol], "top_events": query_events("cn", symbol, as_of_date, 30, 5, NEWS_DB, information_cutoff_at=cutoff)} for symbol in symbols]
+    for item in candidates:
+        item["article_count"] = len(item["top_events"])
+    return {"ok": bool(sources) or any(item["article_count"] for item in candidates), "market": "cn", "as_of_date": as_of_date,
+            "information_cutoff_at": cutoff, "offline": False, "candidates": candidates, "data_sources": sources, "errors": errors}
+
+
+def event_time_cn(value):
+    from servers.data_quality import event_time
+    return event_time(value, "cn")
 
 
 @mcp.tool()
