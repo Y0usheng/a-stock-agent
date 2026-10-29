@@ -116,8 +116,16 @@ class AfterCloseTests(unittest.TestCase):
         with subscription_workspace() as root:
             queue, identifier = self.setup_queue(root)
             queue.confirm(identifier, at=DAY + "T18:00:00+08:00")
-            queue.confirm(identifier, approve=False)
+            queue.confirm(identifier, approve=False, at=DAY + "T18:05:00+08:00")
             self.assertEqual(self.run_due(queue, AccountHost()), [])
+
+    def test_post_close_cancellation_cannot_choose_whether_confirmed_plan_fills(self):
+        with subscription_workspace() as root:
+            queue, identifier = self.setup_queue(root)
+            queue.confirm(identifier, at=DAY + "T18:00:00+08:00")
+            with self.assertRaises(ValueError):
+                queue.confirm(identifier, approve=False, at=NEXT + "T15:01:00+08:00")
+            self.assertEqual(queue.rows()[0]["status"], "confirmed")
 
     def test_future_fill_uses_observed_next_session_price_and_native_fees(self):
         from servers import account_server as account

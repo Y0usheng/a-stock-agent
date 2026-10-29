@@ -137,12 +137,14 @@ class OrderQueue:
 
     def confirm(self, identifier, approve=True, at=None):
         row = next((row for row in self.rows() if row["id"] == identifier), None)
+        at = event_time(at, "cn") if at else now()
         if row and not approve and row["status"] in {"awaiting_confirmation", "confirmed", "executing", "blocked"}:
-            self.update(identifier, "rejected", error="user_cancelled_remaining_orders")
+            if row["status"] in {"confirmed", "executing"} and at >= event_time(row["payload"]["timing"]["approval_deadline"], "cn"):
+                raise ValueError("已过事前撤销期限，不能看完收盘结果后决定是否模拟成交")
+            self.update(identifier, "rejected", error="user_cancelled_remaining_orders", effective_at=at.isoformat())
             return {"status": "rejected_remaining_orders", "plan_hash": identifier, "orders_submitted": 0}
         if not row or row["status"] != "awaiting_confirmation":
             raise ValueError("没有匹配的待确认计划；确认不会重新运行模型")
-        at = event_time(at, "cn") if at else now()
         if at >= event_time(row["payload"]["timing"]["approval_deadline"], "cn"):
             self.update(identifier, "expired", error="confirmation_after_deadline")
             raise ValueError("已过确认期限，不能事后选择收盘成交")
