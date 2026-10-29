@@ -91,6 +91,36 @@ class SubscriptionTests(unittest.TestCase):
         self.assertLess(monotonic() - started, 5)
         self.assertFalse(root.exists())
 
+    def test_valid_terminal_result_does_not_wait_for_process_exit(self):
+        payload = events({"ok": True}) + "\n"
+        code = "import sys,time;sys.stdout.write(" + repr(payload) + ");sys.stdout.flush();time.sleep(60)"
+        started = monotonic()
+        with subscription_workspace() as root:
+            output = _run_codex([sys.executable, "-u", "-c", code], "fixture", root, 8, threading.Event())
+            result, usage = parse_codex_events(output)
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(usage["input_tokens"], 20)
+            diagnostic = json.loads((root / "transport.json").read_text(encoding="utf-8"))
+            self.assertTrue(diagnostic["validated_terminal_result"])
+        self.assertLess(monotonic() - started, 5)
+        self.assertFalse(root.exists())
+
+    def test_message_without_terminal_usage_is_not_adopted(self):
+        raw = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"ok": True})}}) + "\n"
+        code = "import sys,time;sys.stdout.write(" + repr(raw) + ");sys.stdout.flush();time.sleep(60)"
+        with subscription_workspace() as root:
+            with self.assertRaises(TimeoutError):
+                _run_codex([sys.executable, "-u", "-c", code], "fixture", root, 1, threading.Event())
+
+    def test_terminal_event_preserves_error_and_usage_validation(self):
+        for raw in (events({"ok": True}, {"input_tokens": -1, "output_tokens": 1}),
+                    json.dumps({"type": "error", "message": "PRIVATE-CANARY"}) + "\n" + events({"ok": True})):
+            code = "import sys,time;sys.stdout.write(" + repr(raw + "\n") + ");sys.stdout.flush();time.sleep(60)"
+            with subscription_workspace() as root:
+                with self.assertRaises(RuntimeError) as error:
+                    _run_codex([sys.executable, "-u", "-c", code], "fixture", root, 3, threading.Event())
+                self.assertNotIn("PRIVATE-CANARY", str(error.exception))
+
     def test_protocol_diagnostic_contains_no_messages_ids_or_unknown_fields(self):
         with subscription_workspace() as root:
             path = root / "output.jsonl"
