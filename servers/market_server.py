@@ -70,17 +70,24 @@ def _fetch_history(symbol: str, days: int = 120) -> pd.DataFrame:
     if _HAS_AKSHARE:
         try:
             start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
-            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                    start_date=start, adjust="qfq", timeout=30)
-            df = df.rename(columns={"日期": "date", "开盘": "open", "最高": "high",
-                                    "最低": "low", "收盘": "close", "成交量": "volume"})
+            provider = os.environ.get("ASTOCK_CN_PRICE_PROVIDER", "eastmoney")
+            if provider == "sina":
+                from agent.trading_clock import bounded_requests
+                with bounded_requests():
+                    df = ak.stock_zh_a_daily(symbol=("sh" if symbol.startswith("6") else "sz") + symbol,
+                        start_date=start, end_date=datetime.now().strftime("%Y%m%d"), adjust="qfq")
+            elif provider == "eastmoney":
+                df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start, adjust="qfq", timeout=30)
+                df = df.rename(columns={"日期": "date", "开盘": "open", "最高": "high", "最低": "low", "收盘": "close", "成交量": "volume"})
+                df["volume"] = df["volume"] * 100
+            else:
+                raise ValueError("未支持的行情提供商")
             df["date"] = df["date"].astype(str)
-            df["volume"] = df["volume"] * 100  # stock_zh_a_hist 成交量单位为手，账户统一为股
             df = completed_history(df, "cn")
             df = df[["date", "open", "high", "low", "close", "volume"]].tail(days).reset_index(drop=True)
             if len(df) > 0:
                 _cache[key] = df
-                _data_source = "akshare(真实数据)"
+                _data_source = "akshare(真实数据)" if provider == "eastmoney" else "akshare(Sina真实前复权日线)"
                 return df
         except Exception as e:
             raise RuntimeError(f"akshare 获取 {symbol} 行情失败，实时模式已停止") from e
@@ -185,7 +192,9 @@ def get_fundamentals(symbol: str) -> dict:
     if _HAS_AKSHARE and not _FORCE_OFFLINE:
         try:
             start_year = str(datetime.now().year - 3)
-            df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year=start_year)
+            from agent.trading_clock import bounded_requests
+            with bounded_requests(seconds=8):
+                df = ak.stock_financial_analysis_indicator(symbol=symbol, start_year=start_year)
             if len(df):
                 row = df.sort_values("日期").iloc[-1]
                 return {
@@ -223,6 +232,22 @@ def candidate_fundamentals(symbols: list[str]) -> list[dict]:
     if invalid:
         raise ValueError(f"候选池包含未批准A股代码:{', '.join(invalid)}")
     return [get_fundamentals(symbol) for symbol in normalized]
+
+
+@mcp.tool()
+def trading_sessions() -> dict:
+    """宿主专用：真实交易日历，不通过星期推算休市日。"""
+    from agent.trading_clock import calendar
+    return calendar()
+
+
+@mcp.tool()
+def execution_session_quote(symbol: str, day: str) -> dict:
+    """宿主专用：指定已收盘交易日的不复权执行行情；禁止未来报价。"""
+    if _FORCE_OFFLINE:
+        raise ValueError("离线模式禁止真实执行队列")
+    from agent.trading_clock import session_quote
+    return session_quote(symbol, day)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from agent.subscription import INSTRUCTIONS, PROTOCOL_VERSION, SubscriptionClien
 from config import MARKETS
 from evals.experiments import canonical_hash
 from agent.evidence import (CLAIM_SCHEMA, EVIDENCE_VERSION, build_catalog, cited_schema,
-                            validate_claims, validate_result_evidence)
+                            validate_claims, validate_result_evidence, coherent_link_schema)
 from agent.investment import LONG_INSTRUCTIONS, is_long, result_schema, validate_cases, select_materials
 
 EVIDENCE_INSTRUCTIONS = (
@@ -86,14 +86,17 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
         "news": news, "paper_account": paper, "past_predictions": past_predictions}
     if long_term:
         research = context.get("investment_context", {})
+        if context.get("timing"):
+            result["timing"] = deepcopy(context["timing"])
         selected = []
         for symbol in context["symbols"]:
             material_rows = [row for row in research.get("materials", []) if row["symbol"] == symbol]
             for row in select_materials(material_rows, 4):
-                item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt"), text_limit=1200)
+                text_limit = 1400 if context.get("timing") else 1200
+                item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
                 item["categories"] = [category for category in row["categories"] if category in {"business", "financials", "industry"}]
                 item["source_truth_verified"] = False
-                item["excerpt_truncated"] = len(row.get("excerpt", "")) > 1200
+                item["excerpt_truncated"] = len(row.get("excerpt", "")) > text_limit
                 selected.append(item)
         result.update(research_materials=selected, price_history=deepcopy(research.get("price_history", [])),
             previous_cases=deepcopy(research.get("previous_cases", [])), research_tasks=deepcopy(research.get("tasks", [])),
@@ -117,6 +120,9 @@ def subscription_manifest(manifest: dict) -> dict:
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"],
             "long_instructions": LONG_INSTRUCTIONS, "schema": result_schema(RESULT_EVIDENCE_SCHEMA),
             "projection": "long-research-and-news-opportunities-v2"})
+    if value.get("version") == "manager-long-v2":
+        value["template_sha256"] = canonical_hash({"base": value["template_sha256"],
+            "coherent_evidence_schemas": [coherent_link_schema(schema) for schema in (SUMMARY_SCHEMA, result_schema(RESULT_EVIDENCE_SCHEMA), RISK_SCHEMA)]})
     return value
 
 
@@ -129,6 +135,7 @@ class SubscriptionRoles:
         self.manager_prompt = manager_prompt
         self.catalog = build_catalog(self.context, market, allow_synthetic=allow_synthetic)
         self.claims_by_role = {}
+        self.raw_outputs = {}
 
     def audit(self):
         return {"catalog": deepcopy(self.catalog), "analyst_claims": deepcopy(self.claims_by_role),
@@ -160,6 +167,9 @@ class SubscriptionRoles:
                            auxiliary_gaps=context["auxiliary_gaps"], investment_policy=context["investment_policy"])
             payload["opportunity_context"] = context["opportunity_context"]
             payload["opportunity_boundary"] = "主题仅为前序模型提出的待核验假设；不可作为公司事实或证据ID引用，不能替代公司披露、估值、反证及建仓条件。无新新闻不等于论证失效。"
+            if context.get("timing"):
+                payload["timing"] = context["timing"]
+                payload["timing_boundary"] = "行情日不等于决策时间。只使用information_cutoff_at前已观察资料；本轮只提出未来交易日收盘的限价模拟计划，参考价仍填冻结行情价。未确认、超时或超限不成交；估值和研究完成不等于已买入。"
         prompt = self.manager_prompt if name == "investment-manager" else self.definitions[name].prompt
         instructions = EVIDENCE_INSTRUCTIONS
         if self.long_term:
@@ -171,7 +181,10 @@ class SubscriptionRoles:
         schema = RESULT_EVIDENCE_SCHEMA if name == "investment-manager" else RISK_SCHEMA if name == "risk-manager" else SUMMARY_SCHEMA
         if self.long_term and name == "investment-manager":
             schema = result_schema(schema)
+        if context.get("timing"):
+            schema = coherent_link_schema(schema)
         result = await self.client.complete(prompt, schema, role=name)
+        self.raw_outputs[name] = deepcopy(result)
         if name in {"technical-analyst", "fundamental-analyst"}:
             summary = result.get("summary")
             if not isinstance(summary, str) or not summary.strip() or len(summary) > 6000:

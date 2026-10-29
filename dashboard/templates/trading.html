@@ -7,6 +7,7 @@
 <header><div><div class="eyebrow">AGENT / PAPER PORTFOLIO</div><h1>模拟交易，跟着真实市场走</h1><p class="muted" id="subtitle">加载数据…</p></div><div><span class="badge" id="status">A股 · 只读展示</span> <a href="/">账户总览 ↗</a></div></header>
 <section class="card section" style="margin-bottom:16px"><div class="heading"><h2>新闻 → 长期研究机会</h2><span class="badge" id="opportunityState">等待发现</span></div><div id="opportunities"></div></section>
 <div id="error"></div><div id="content" hidden>
+<section id="executionClock" class="card section" hidden><h2>研究时点与未来模拟成交</h2><div id="executionDetails"></div><div id="queuedOrders"></div></section>
 <div class="grid">
 <div class="card"><div class="muted">模拟总资产</div><div class="metric" id="assets"></div><div class="muted" id="cash"></div></div>
 <div class="card"><div class="muted">累计净盈亏 · 已扣成交费用</div><div class="metric" id="pnl"></div><div class="muted" id="return"></div></div>
@@ -53,6 +54,12 @@ function drawOpportunities(){
  `<p class="muted">${o.excluded_events.length} 条事件因采集时间、重复或完整性问题排除；${o.omitted_theme_ids.length} 个主题因单轮预算留待后续。打开本页不会调用模型或交易。</p>`;
 }
 drawOpportunities();
+if(data.timing){
+ const t=data.timing;$('executionClock').hidden=false;
+ $('executionDetails').innerHTML=`<p>参考行情 ${esc(t.price_as_of_date)} · 信息截止 ${esc(t.information_cutoff_at)} · 判断完成 ${esc(t.decision_at||'—')}</p><p>计划执行：${esc(t.execution_session)} 收盘 · 确认期限 ${esc(t.approval_deadline)} · 价格偏离上限 ${number(t.max_price_deviation_pct*100,1)}%</p><p class="muted">下一交易日收盘后按已观察的不复权价格与预设滑点处理。未经事前确认、价格超限或行情缺失不会生成成交。页面不能批准交易。</p>`;
+ const states={awaiting_confirmation:'待本机确认',confirmed:'已确认 · 等待未来交易日',executing:'执行结果待核对',filled:'模拟成交已登记',partially_filled:'部分模拟成交',cancelled:'条件未满足 · 已取消',rejected:'本机已取消',expired:'确认期限已过',blocked:'账户变化 · 需本机复核'};
+ $('queuedOrders').innerHTML=(data.pending_orders||[]).map(o=>`<div class="summary"><b>${esc(o.symbol)} · ${esc(o.action)} ${esc(o.shares)} 股 · ${esc(states[o.status]||o.status)}</b><p>目标交易日 ${esc(o.execution_session)} · 参考价 ${money(o.reference_price)} · 状态记录 ${esc(o.state_recorded_at)}</p></div>`).join('');
+}
 function plot(id,series,{height=300,width=760,unit='',markers=[],hover=false}={}){
  const svg=$(id), all=series.flatMap(s=>s.points).filter(p=>p.value!=null), dates=[...new Set(all.map(p=>p.date))].sort();
  if(!all.length){svg.innerHTML='<text x="45" y="55">尚无可绘制的真实记录</text>';return;}

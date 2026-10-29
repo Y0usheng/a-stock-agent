@@ -26,6 +26,10 @@ class AnalysisHost:
         self.market = host.market
         self.active_symbols = list(host.active_symbols)
         self.news_screen = deepcopy(host.news_screen)
+        if getattr(host, "timing", None):
+            self.timing = deepcopy(host.timing)
+        if getattr(host, "investment_context", None):
+            self.investment_context = deepcopy(host.investment_context)
         self._cache: dict[str, object] = {}
         self._requests: dict[str, dict] = {}
         self._snapshot = {item["symbol"]: deepcopy(item) for item in snapshot}
@@ -76,6 +80,8 @@ class AnalysisHost:
         }
         if getattr(self, "investment_context", None) is not None:
             data["investment_context"] = self.investment_context
+        if getattr(self, "timing", None):
+            data["timing"] = self.timing
         return deepcopy(data)
 
 

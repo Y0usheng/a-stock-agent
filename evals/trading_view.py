@@ -18,7 +18,7 @@ PRICE_CACHE = DATA_DIR / "market_views" / "cn-prices.json"
 
 def analysis_logs(root=LOG_DIR):
     rows = []
-    for path in [*Path(root).glob("*.cn.json"), *(Path(root) / "shadow").glob("*.cn.json")]:
+    for path in [*Path(root).glob("*.cn.json"), *(Path(root) / "shadow").glob("*.cn.json"), *(Path(root) / "after_close").glob("*.cn.json")]:
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
             if row.get("market") == "cn" and not uses_synthetic_data(row):

@@ -37,7 +37,10 @@ class GraphState(TypedDict, total=False):
 def manager_instructions(market, as_of_date, symbols, version=None):
     from agent.investment import is_long, manager_prompt
     if is_long(version):
-        return manager_prompt(market, as_of_date, symbols)
+        prompt = manager_prompt(market, as_of_date, symbols)
+        if version == "manager-long-v2":
+            prompt += "\n收盘后协议：区分行情日与实际信息截止；只输出次交易日收盘限价模拟计划，未确认不成交。自动提取的PDF片段须核对可见表头、单位和限定条件；未见完整表格或脚注时明确缺口，不把下载成功当作数值语义已核验。evidence.status表示当前论断有无引用支持，不表示建仓研究是否完成；有可用支持引用就用supported。即使research_status为pending，也可引用已知业务事实的supported证据，同时在core_gaps列出估值等不足。若用insufficient则supporting_ids必须为空；不得一边声称无支持、一边填写支持ID。"
+        return prompt
     original = _system_prompt(market, as_of_date, symbols, version)
     return (original.split("严格按顺序工作：")[0] +
             "技术与基本面专家已经并行完成，输出在输入 JSON 中。忠实结合两者、账户与新闻，"
@@ -181,9 +184,11 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         "account": await host.call("get_account", {}), "memory": memory,
         "news": host.news_screen,
         "fundamentals": await host.call("candidate_fundamentals", {"symbols": host.active_symbols})}
+    if getattr(host, "timing", None):
+        current_context["timing"] = deepcopy(host.timing)
     if long_term:
         identity = case_variant({"agent_sdk": {"prompt": manifest, "role_models": {name: asdict(role) for name, role in routing.items()}, "budget": subscription_config}})
-        research = await prepare_context(host, as_of_date, host.active_symbols, identity)
+        research = deepcopy(host.investment_context) if getattr(host, "investment_context", None) else await prepare_context(host, as_of_date, host.active_symbols, identity)
         quote_prices = {row["symbol"]: row["close"] for row in current_context["snapshot"]}
         for row in list(research.get("price_history", [])):
             if abs(row["recent_daily"][-1]["close"] - quote_prices[row["symbol"]]) > 1e-6:
@@ -264,6 +269,15 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
                 state = await asyncio.wait_for(graph.ainvoke(invocation, config),
                     timeout=positive_env("ASTOCK_ANALYSIS_TIMEOUT", 600))
                 awaiting = bool(state.get("__interrupt__"))
+    except Exception as exc:
+        if prompt_version == "manager-long-v2" and subscription_roles is not None:
+            from agent.analysis import write_log
+            from config import LOG_DIR
+            write_log(LOG_DIR / "failures" / (as_of_date + "." + uuid4().hex + ".cn.json"), {
+                "status": "failed", "error_type": type(exc).__name__, "orders_submitted": 0,
+                "timing": getattr(host, "timing", {}), "context_fingerprint": context_hash,
+                "raw_role_outputs": deepcopy(subscription_roles.raw_outputs), **capture_metadata()})
+        raise
     finally:
         if factory is not None:
             await factory.close()

@@ -122,15 +122,18 @@ class OpportunityBook:
         with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
             return [json.loads(row[0]) for row in conn.execute(sql, args)]
 
-    def feed(self, as_of_date, days=30):
-        end = market_close(as_of_date, "cn")
+    def feed(self, as_of_date, days=30, information_cutoff_at=None):
+        end = event_time(information_cutoff_at, "cn") if information_cutoff_at else market_close(as_of_date, "cn")
         start = end - timedelta(days=days)
         events = [row for row in self._read("SELECT payload FROM events ORDER BY id")
                   if start <= event_time(row["published_at"], "cn") <= end]
         receipts = [row for row in self._read("SELECT payload FROM fetches ORDER BY id DESC")
                     if event_time(row["observed_at"], "cn") <= end]
-        return {"as_of_date": as_of_date, "events": events, "latest_fetch": receipts[0] if receipts else None,
-                "coverage": "partial_public_feed_and_imports_not_full_market", "window_days": days}
+        result = {"as_of_date": as_of_date, "events": events, "latest_fetch": receipts[0] if receipts else None,
+                  "coverage": "partial_public_feed_and_imports_not_full_market", "window_days": days}
+        if information_cutoff_at:
+            result["information_cutoff_at"] = end.isoformat()
+        return result
 
     def cached_review(self, identity):
         rows = self._read("SELECT payload FROM reviews WHERE id=?", (identity,))
@@ -156,13 +159,16 @@ class OpportunityBook:
             return {"status": "no_data", "message": "尚未运行行业机会发现"}
         histories = histories or {}
         snapshots = self._read("SELECT payload FROM snapshots ORDER BY rowid")
-        first_dates = {}
+        first_dates, first_times = {}, {}
         for row in snapshots:
             for symbol in row["selected_symbols"]:
-                first_dates[symbol] = min(first_dates.get(symbol, row["as_of_date"]), row["as_of_date"])
+                stamp = event_time(row.get("discovery_decided_at") or row.get("information_cutoff_at"), "cn") if row.get("information_cutoff_at") else market_close(row["as_of_date"], "cn")
+                if symbol not in first_times or stamp < first_times[symbol]:
+                    first_times[symbol] = stamp
+                    first_dates[symbol] = stamp.date().isoformat()
         observations = []
         for symbol, day in sorted(first_dates.items()):
-            rows = sorted((row for row in histories.get(symbol, []) if row["date"] > day), key=lambda row: row["date"])
+            rows = sorted((row for row in histories.get(symbol, []) if market_close(row["date"], "cn") > first_times[symbol]), key=lambda row: row["date"])
             observations.append({"symbol": symbol, "selected_on": day,
                 "observation_start": rows[0]["date"] if rows else None,
                 "price_as_of": rows[-1]["date"] if rows else None,
@@ -196,7 +202,7 @@ def refresh_feed(book=None):
 
 
 def route_feed(feed):
-    cutoff = market_close(feed["as_of_date"], "cn")
+    cutoff = event_time(feed["information_cutoff_at"], "cn") if feed.get("information_cutoff_at") else market_close(feed["as_of_date"], "cn")
     if cutoff.date() > datetime.now(market_zone("cn")).date():
         raise ValueError("不能创建未来日期的研究快照")
     eligible, excluded, seen = [], [], set()
@@ -299,6 +305,8 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
                 "excerpt": event["excerpt"][:450], "excerpt_truncated": len(event["excerpt"]) > 450} for event in row["events"]]
         payload = {"as_of_date": feed["as_of_date"], "themes": visible,
                    "symbol_names": {x["symbol"]: x["name"] for x in MARKETS["cn"]["candidate_universe"]}}
+        if feed.get("information_cutoff_at"):
+            payload["information_cutoff_at"] = feed["information_cutoff_at"]
         identity = canonical_hash({"version": VERSION, "instructions": INSTRUCTIONS, "schema": schema,
                                    "model": client.model, "settings": client.settings, "payload": payload})
         try:
@@ -349,6 +357,9 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
         "candidates": candidates, "usage": usage, "review_error": error, "review_cached": cached,
         "new_candidate_limit": limit, "orders_submitted": 0,
         "limitations": ["公开快讯与导入资料仅部分覆盖市场，未做全市场优胜排名", "公司映射和媒体语义仍须核对，模型假设不等于事实", "只有在行情截止前已采集的资料可进入本轮，禁止回填历史知识", "研究优先级不替代公司披露、估值及风控；来源数量不是收益概率"]}
+    if feed.get("information_cutoff_at"):
+        snapshot.update(information_cutoff_at=feed["information_cutoff_at"], cutoff=feed["information_cutoff_at"],
+                        timing_policy="after_close_information_then_future_session_execution", discovery_decided_at=datetime.now(market_zone("cn")).isoformat())
     snapshot["fingerprint"] = canonical_hash(snapshot)
     book.save(snapshot)
     return snapshot
