@@ -128,6 +128,24 @@ def protocol_progress(path):
     return {"phase": phase, "event_counts": counts}
 
 
+def completed_output(path, *, process_exited=False):
+    """A validated terminal event finishes inference; process teardown is separate."""
+    raw = Path(path).read_bytes()
+    if not process_exited:
+        # A live writer can stop mid-UTF8 or mid-JSON. Only inspect complete JSONL lines.
+        raw = raw[:raw.rfind(b"\n") + 1]
+    text = raw.decode("utf-8")
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "turn.completed":
+            parse_codex_events(text)  # Preserve tool, error, usage and final-JSON checks.
+            return text
+    return None
+
+
 def _run_codex(args, prompt, root, timeout, cancelled):
     # 文件句柄避免 Windows 子进程继承管道后 communicate() 永远等不到 EOF。
     input_file, output_file, error_file = (root / name for name in ("input.txt", "output.jsonl", "error.txt"))
@@ -140,23 +158,36 @@ def _run_codex(args, prompt, root, timeout, cancelled):
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         started = monotonic()
         deadline = started + timeout
+        terminal_output = None
+        observed_size = -1
         try:
             while process.poll() is None:
                 if cancelled.is_set():
                     raise RuntimeError("订阅调用已取消")
+                size = output_file.stat().st_size
+                if size != observed_size:
+                    observed_size = size
+                    terminal_output = completed_output(output_file)
+                    if terminal_output is not None:
+                        break
                 if monotonic() >= deadline:
                     phase = protocol_progress(output_file)["phase"]
                     raise TimeoutError(f"订阅调用超过 {timeout} 秒，已终止；观察到的阶段={phase}；未转用 API")
                 cancelled.wait(min(0.1, max(deadline - monotonic(), 0)))
+            if terminal_output is None:
+                terminal_output = completed_output(output_file, process_exited=True)
         finally:
             try:
                 _stop_process(process)
             finally:
-                diagnostic = {**protocol_progress(output_file), "elapsed_seconds": round(monotonic()-started, 3), "exit_code": process.poll()}
+                diagnostic = {**protocol_progress(output_file), "elapsed_seconds": round(monotonic()-started, 3), "exit_code": process.poll(),
+                    "validated_terminal_result": terminal_output is not None}
                 try:
                     (root / "transport.json").write_text(json.dumps(diagnostic), encoding="utf-8")
                 except OSError:
                     pass
+    if terminal_output is not None:
+        return terminal_output
     if process.returncode != 0:
         # 原始 stderr 可能含账户元数据，不进入项目日志。
         error = error_file.read_text(encoding="utf-8", errors="replace").lower()
