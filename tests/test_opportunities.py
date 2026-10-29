@@ -162,6 +162,26 @@ class OpportunityTests(unittest.TestCase):
         self.assertEqual(result["selected_symbols"], [])
         self.assertEqual(result["active_symbols"], ["600276"])
 
+    def test_timeout_is_a_failed_review_not_a_negative_investment_judgment(self):
+        from evals.public_reports import sanitize_view
+        class TimeoutClient(FakeClient):
+            async def complete(self, *args, **kwargs):
+                self.calls += 1
+                raise TimeoutError("PRIVATE-DIAGNOSTIC")
+        with subscription_workspace() as root:
+            book = OpportunityBook(root / "opportunities.db")
+            result = asyncio.run(discover(feed(), book=book, client=TimeoutClient(None)))
+            view = book.view()
+        self.assertEqual(result["selection_mode"], "discovery_failed")
+        self.assertEqual(result["selected_symbols"], [])
+        self.assertEqual(view["status"], "review_failed")
+        related = [row for row in result["candidates"] if row["theme_ids"]]
+        self.assertTrue(all(row["status"] == "review_unavailable" for row in related))
+        public = sanitize_view({"opportunities": view})
+        self.assertEqual(public["opportunities"]["status"], "review_failed")
+        self.assertNotIn("PRIVATE-DIAGNOSTIC", json.dumps(public))
+        self.assertNotIn("review_error", public["opportunities"])
+
     def test_repeated_snapshot_reuses_review_zero_new_calls(self):
         with subscription_workspace() as root:
             book = OpportunityBook(root / "test.db")

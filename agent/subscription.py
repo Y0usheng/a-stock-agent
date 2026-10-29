@@ -106,6 +106,28 @@ def _stop_process(process):
     process.wait(timeout=3)
 
 
+def protocol_progress(path):
+    """Only event counters leave the temporary output; never IDs, messages or stderr."""
+    kinds = {"thread.started", "turn.started", "turn.completed", "turn.failed", "item.started", "item.updated", "item.completed", "error"}
+    counts = {}
+    phase = "no_protocol_events_observed"
+    try:
+        with Path(path).open("rb") as stream:
+            raw = stream.read(1_000_000)
+        for line in raw.splitlines():
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeError, RecursionError):
+                continue
+            kind = event.get("type") if isinstance(event, dict) else None
+            if isinstance(kind, str) and kind in kinds:
+                counts[kind] = counts.get(kind, 0) + 1
+                phase = kind
+    except OSError:
+        phase = "diagnostic_unavailable"
+    return {"phase": phase, "event_counts": counts}
+
+
 def _run_codex(args, prompt, root, timeout, cancelled):
     # 文件句柄避免 Windows 子进程继承管道后 communicate() 永远等不到 EOF。
     input_file, output_file, error_file = (root / name for name in ("input.txt", "output.jsonl", "error.txt"))
@@ -116,16 +138,25 @@ def _run_codex(args, prompt, root, timeout, cancelled):
         process = subprocess.Popen(args, stdin=source, stdout=output, stderr=errors,
             env=subscription_environment(),
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        deadline = monotonic() + timeout
+        started = monotonic()
+        deadline = started + timeout
         try:
             while process.poll() is None:
                 if cancelled.is_set():
                     raise RuntimeError("订阅调用已取消")
                 if monotonic() >= deadline:
-                    raise TimeoutError(f"订阅调用超过 {timeout} 秒，已终止；未转用 API")
+                    phase = protocol_progress(output_file)["phase"]
+                    raise TimeoutError(f"订阅调用超过 {timeout} 秒，已终止；观察到的阶段={phase}；未转用 API")
                 cancelled.wait(min(0.1, max(deadline - monotonic(), 0)))
         finally:
-            _stop_process(process)
+            try:
+                _stop_process(process)
+            finally:
+                diagnostic = {**protocol_progress(output_file), "elapsed_seconds": round(monotonic()-started, 3), "exit_code": process.poll()}
+                try:
+                    (root / "transport.json").write_text(json.dumps(diagnostic), encoding="utf-8")
+                except OSError:
+                    pass
     if process.returncode != 0:
         # 原始 stderr 可能含账户元数据，不进入项目日志。
         error = error_file.read_text(encoding="utf-8", errors="replace").lower()
@@ -200,6 +231,7 @@ class SubscriptionClient:
         self.settings = subscription_settings()
         self.calls: list[dict] = []
         self.requests_started = 0
+        self.transport_attempts = []
         self._login = None
         self._lock = asyncio.Lock()
 
@@ -212,6 +244,7 @@ class SubscriptionClient:
         return {**self.settings, **usage, "requests_started": self.requests_started,
                 "completed_calls": len(self.calls),
                 "usage_complete": self.requests_started == len(self.calls),
+                "transport_attempts": list(self.transport_attempts),
                 "total_tokens": usage["input_tokens"] + usage["output_tokens"],
                 "budget_enforcement": "completed_calls_and_next_call_gate"}
 
@@ -265,6 +298,12 @@ class SubscriptionClient:
                     except (Exception, asyncio.CancelledError):
                         pass
                     raise
+                finally:
+                    try:
+                        diagnostic = json.loads((root / "transport.json").read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        diagnostic = {"phase": "diagnostic_unavailable"}
+                    self.transport_attempts.append({"role": role, **diagnostic})
                 result, usage = parse_codex_events(stdout)
                 self.calls.append({"role": role, **usage})
                 print(f"订阅研究：{role} 完成，耗时{monotonic()-started:.1f}秒，累计{self.report()['total_tokens']} tokens", flush=True)
