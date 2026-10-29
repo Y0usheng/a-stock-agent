@@ -1,5 +1,6 @@
 """只读模拟账本与真实股价的展示数据；不生成交易或回填虚构收益。"""
 from contextlib import closing
+from copy import deepcopy
 from datetime import date
 import json
 from pathlib import Path
@@ -177,8 +178,15 @@ def load_view(cache=PRICE_CACHE, log_dir=LOG_DIR, db=None):
     if not Path(cache).exists():
         return {"status": "no_data", "message": "尚未缓存真实股价，请先运行 scripts/refresh_trading_view.py", "opportunities": OpportunityBook().view()}
     payload = json.loads(Path(cache).read_text(encoding="utf-8"))
-    result = build_view(payload, read_ledger(db or MARKETS["cn"]["db"]), analysis_logs(log_dir))
+    logs = analysis_logs(log_dir)
+    result = build_view(payload, read_ledger(db or MARKETS["cn"]["db"]), logs)
     result["opportunities"] = OpportunityBook().view(payload.get("histories", {}))
+    if logs and logs[-1].get("timing"):
+        from agent.order_queue import OrderQueue
+        from agent.trading_clock import now
+        result["timing"] = deepcopy(logs[-1]["timing"])
+        result["pending_orders"] = OrderQueue().public_state(now().date().isoformat())
+        result["analysis_date"] = (logs[-1]["timing"].get("decision_at") or logs[-1]["timing"]["information_cutoff_at"])[:10]
     return result
 
 

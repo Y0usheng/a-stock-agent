@@ -16,7 +16,7 @@ from config import DATA_DIR, MARKETS, ROOT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
-VERSION = "controlled-pdf-capture-v3"
+VERSION = "controlled-pdf-capture-v4"
 HOME = DATA_DIR / "disclosures"
 MAX_PDF = 40_000_000
 UNITS = re.compile(r"单位\s*[：:][^\n]{1,45}|营业收入\s*[（(](?:元|千元|万元|百万元)[）)]")
@@ -136,6 +136,12 @@ def select_passages(document, extracted):
             # Prefer a compact page with several relevant labels, not isolated keyword density.
             score = len(hits) + (10 if category == "financials" and "主要会计数据" in text else 0)
             start = max(0, min(hits) - 220)
+            business_heading = re.search(r"(?:^|\n)[一二三四五六七八九十]+、\s*报告期内公司[^\n]{0,12}业务", text)
+            if category == "business" and business_heading:
+                score += 100
+                start = business_heading.start()
+            elif category == "financials" and "主要会计数据" in text:
+                start = text.rfind("\n", 0, text.find("主要会计数据")) + 1
             start = text.rfind("\n", 0, start) + 1
             end = text.rfind("\n", start, min(len(text), start + 1100))
             end = end if end > start + 100 else min(len(text), start + 1100)

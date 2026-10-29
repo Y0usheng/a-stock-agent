@@ -18,8 +18,8 @@ CLAIM_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "required": ["symbol", "claim", "evidence"]}
 
 
-def coherent_link_schema(schema):
-    """Constrain mutually exclusive evidence states in new-protocol model output."""
+def derived_link_schema(schema):
+    """Reference state is derived by the host, avoiding a redundant model field."""
     value = deepcopy(schema)
     def visit(node):
         if isinstance(node, list):
@@ -29,13 +29,27 @@ def coherent_link_schema(schema):
             props = node.get("properties", {})
             link = props.get("evidence")
             if link and "supporting_ids" in link.get("properties", {}):
-                branches = []
-                for status in ("supported", "insufficient"):
-                    branch = deepcopy(link)
-                    branch["properties"]["status"]["enum"] = [status]
-                    branch["properties"]["supporting_ids"]["minItems" if status == "supported" else "maxItems"] = 1 if status == "supported" else 0
-                    branches.append(branch)
-                props["evidence"] = {"anyOf": branches}
+                link["properties"].pop("status", None)
+                link["required"] = [key for key in link["required"] if key != "status"]
+            for child in node.values():
+                visit(child)
+    visit(value)
+    return value
+
+
+def restore_link_status(result):
+    """Derive citation presence only; do not change claims, IDs or research readiness."""
+    value = deepcopy(result)
+    def visit(node):
+        if isinstance(node, list):
+            for child in node:
+                visit(child)
+        elif isinstance(node, dict):
+            link = node.get("evidence")
+            if isinstance(link, dict) and isinstance(link.get("supporting_ids"), list):
+                if "status" in link:
+                    raise ValueError("新输出的引用状态只能由宿主计算")
+                link["status"] = "supported" if link["supporting_ids"] else "insufficient"
             for child in node.values():
                 visit(child)
     visit(value)

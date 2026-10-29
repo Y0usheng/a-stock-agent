@@ -211,6 +211,7 @@ class SubscriptionClient:
             value is not None for value in reasons) else None
         return {**self.settings, **usage, "requests_started": self.requests_started,
                 "completed_calls": len(self.calls),
+                "usage_complete": self.requests_started == len(self.calls),
                 "total_tokens": usage["input_tokens"] + usage["output_tokens"],
                 "budget_enforcement": "completed_calls_and_next_call_gate"}
 
@@ -222,6 +223,11 @@ class SubscriptionClient:
             report = self.report()
             if self.requests_started >= self.settings["request_limit"] or report["total_tokens"] >= self.settings["token_limit"]:
                 raise RuntimeError("订阅调用达到本轮预算，停止后续调用")
+            # Codex has request overhead beyond our prompt. Do not start another four-role
+            # request when almost no budget remains; completed usage is still checked below.
+            reserve = min(8000, self.settings["token_limit"] // 4)
+            if self.settings["request_limit"] == 4 and self.calls and self.settings["token_limit"] - report["total_tokens"] < reserve:
+                raise RuntimeError("剩余订阅预算不足以保留下一角色开销，停止后续调用")
             if self._login is None:
                 self._login = await asyncio.to_thread(check_subscription_login)
             with subscription_workspace() as root:

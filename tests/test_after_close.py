@@ -196,21 +196,24 @@ class AfterCloseTests(unittest.TestCase):
         current = build_catalog(export_paper_context(context, "cn", True), "cn")
         self.assertFalse(next(row for row in current["records"] if row["kind"] == "news")["eligible"])
 
-    def test_generated_output_schema_excludes_contradictory_evidence_state(self):
+    def test_reference_state_is_derived_without_rewriting_claims_or_ids(self):
         import jsonschema
-        from agent.evidence import coherent_link_schema
+        from agent.evidence import derived_link_schema, restore_link_status
         from agent.investment import result_schema
         from agent.subscription_roles import RESULT_EVIDENCE_SCHEMA
         _, result = example(True)
-        schema = coherent_link_schema(result_schema(RESULT_EVIDENCE_SCHEMA))
+        schema = derived_link_schema(result_schema(RESULT_EVIDENCE_SCHEMA))
         case_schema = schema["properties"]["investment_cases"]["items"]
         case = deepcopy(result["investment_cases"][0])
-        jsonschema.validate(case, case_schema)
-        case["evidence"]["status"] = "insufficient"
         with self.assertRaises(jsonschema.ValidationError):
             jsonschema.validate(case, case_schema)
+        expected = deepcopy(case)
+        case["evidence"].pop("status")
+        jsonschema.validate(case, case_schema)
+        self.assertEqual(restore_link_status({"cases": [case]})["cases"][0], expected)
         case["evidence"]["supporting_ids"] = []
         jsonschema.validate(case, case_schema)
+        self.assertEqual(restore_link_status({"cases": [case]})["cases"][0]["evidence"]["status"], "insufficient")
 
     def test_report_selection_excludes_summary_foreign_company_and_path_injection(self):
         rows = [{"secCode": "300308", "announcementTitle": "2025年年度报告" + suffix,
@@ -255,6 +258,39 @@ class AfterCloseTests(unittest.TestCase):
         texts = ["公司代码300308\n其他表格\n单位：万元", "主要会计数据 本报告期 上年同期\n营业收入 123 100\n" + "表格说明\n" * 30]
         extracted = {"pages": [{"pdf_page": i+1, "text": text, "text_hash": canonical_hash(text)} for i, text in enumerate(texts)]}
         self.assertFalse(select_passages(document, extracted)[0]["unit_context_present"])
+
+    def test_business_section_precedes_keyword_rich_subsidiary_table(self):
+        document = {"symbol": "300308", "document_type": "annual"}
+        texts = ["公司代码300308" + "基本信息" * 30,
+                 "二、报告期内公司从事的业务情况\n公司主要业务及产品说明\n" + "这是集团业务说明\n" * 30,
+                 "子公司表\n主要业务 主营业务 经营模式 核心竞争力 主要风险\n" + "子公司表格\n" * 40]
+        extracted = {"pages": [{"pdf_page": i+1, "text": text, "text_hash": canonical_hash(text)} for i, text in enumerate(texts)]}
+        business = next(row for row in select_passages(document, extracted) if row["categories"] == ["business"])
+        self.assertEqual(business["pdf_page"], 2)
+
+    def test_nearly_exhausted_budget_stops_before_launching_risk_call(self):
+        from agent.subscription import SubscriptionClient
+        client = SubscriptionClient("fixture")
+        client.requests_started = 3
+        client.calls = [{"role": "fixture", "input_tokens": 13000, "output_tokens": 1, "cached_input_tokens": 0, "reasoning_output_tokens": 0} for _ in range(3)]
+        with patch("agent.subscription.check_subscription_login") as login:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(client.complete("fixture", {}, role="risk-manager"))
+            login.assert_not_called()
+        self.assertEqual(client.requests_started, 3)
+
+    def test_technical_facts_use_real_snapshot_without_model_or_trade(self):
+        from agent.graph_runner import manager_instructions
+        from agent.subscription_roles import SubscriptionRoles
+        context, _ = example(True)
+        context["timing"] = timing()
+        roles = SubscriptionRoles(context, "cn", manager_instructions("cn", DAY, ["300750"], "manager-long-v2"), "fixture", long_term=True)
+        with patch.object(roles.client, "complete") as complete:
+            result = json.loads(asyncio.run(roles.call("technical-analyst", "fixture")))
+            complete.assert_not_called()
+        self.assertIn(str(context["snapshot"][0]["close"]), result["claims"][0]["claim"])
+        self.assertEqual(roles.client.requests_started, 0)
+        self.assertEqual(roles.audit()["role_sources"]["technical-analyst"], "host_quote_indicator_facts_v1")
 
 
 if __name__ == "__main__":

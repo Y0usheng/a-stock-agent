@@ -264,7 +264,7 @@ class ResearchBook:
                     task["status"] = "overdue" if day > task["review_by"] else old_task[1]
                     tasks.append(task)
         return {"policy": POLICY, "as_of_date": day, "materials": materials, "previous_cases": previous, "tasks": tasks,
-                "visibility_policy": "published_by_close; first_seen_retained; imports_not_independently_verified"}
+                "visibility_policy": "published_and_first_seen_by_information_cutoff; imports_not_independently_verified" if information_cutoff_at else "published_by_close; first_seen_retained; imports_not_independently_verified"}
 
     def save(self, log, variant):
         from agent.contracts import validate_decision_result

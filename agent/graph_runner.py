@@ -39,7 +39,16 @@ def manager_instructions(market, as_of_date, symbols, version=None):
     if is_long(version):
         prompt = manager_prompt(market, as_of_date, symbols)
         if version == "manager-long-v2":
-            prompt += "\n收盘后协议：区分行情日与实际信息截止；只输出次交易日收盘限价模拟计划，未确认不成交。自动提取的PDF片段须核对可见表头、单位和限定条件；未见完整表格或脚注时明确缺口，不把下载成功当作数值语义已核验。evidence.status表示当前论断有无引用支持，不表示建仓研究是否完成；有可用支持引用就用supported。即使research_status为pending，也可引用已知业务事实的supported证据，同时在core_gaps列出估值等不足。若用insufficient则supporting_ids必须为空；不得一边声称无支持、一边填写支持ID。"
+            from config import MARKETS, MAX_POSITION_PCT
+            from agent.investment import LONG_INSTRUCTIONS
+            prompt = (f"你是A股长期模拟投资经理，行情日{as_of_date}，研究池{','.join(symbols)}。" + LONG_INSTRUCTIONS +
+                f"股数为{MARKETS[market]['lot_size']}的倍数，单股不超过{MAX_POSITION_PCT:.0%}，受现金及T+1约束。"
+                "逐股论证、计划和252交易日预测；估值缺口保持空值并列补证任务，不编造数值。"
+                "建仓须研究完成、有业务和财务原始披露引用及明确估值；否则记录核心缺口，7天内复核。"
+                "计划参考价为冻结行情价。区分行情日与实际信息截止，只提出未来交易日收盘计划，未确认不成交。"
+                "PDF须核对可见表头、单位及限定条件；提取成功不等于语义核验。"
+                "引用状态由宿主按支持ID是否为空计算，不表示建仓研究完成；core_gaps另列未解决依据。"
+                "只返回输出格式要求的JSON，不自行宣称风控审批或成交。")
         return prompt
     original = _system_prompt(market, as_of_date, symbols, version)
     return (original.split("严格按顺序工作：")[0] +
@@ -241,6 +250,8 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         if subscription_roles is not None:
             captured["evidence_audit"] = subscription_roles.audit()
             captured["run_metadata"]["evidence_fingerprint"] = subscription_roles.catalog["fingerprint"]
+            if current_context.get("timing"):
+                captured["run_metadata"]["role_sources"] = subscription_roles.audit()["role_sources"]
         return captured
     try:
         async with AsyncSqliteSaver.from_conn_string(str(path)) as saver:
