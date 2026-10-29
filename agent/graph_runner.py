@@ -283,9 +283,10 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
     except Exception as exc:
         if prompt_version == "manager-long-v2" and subscription_roles is not None:
             from agent.analysis import write_log
+            from agent.trading_clock import now
             from config import LOG_DIR
             write_log(LOG_DIR / "failures" / (as_of_date + "." + uuid4().hex + ".cn.json"), {
-                "status": "failed", "error_type": type(exc).__name__, "orders_submitted": 0,
+                "status": "failed", "error_type": type(exc).__name__, "failed_at": now().isoformat(), "orders_submitted": 0,
                 "timing": getattr(host, "timing", {}), "context_fingerprint": context_hash,
                 "raw_role_outputs": deepcopy(subscription_roles.raw_outputs), **capture_metadata()})
         raise

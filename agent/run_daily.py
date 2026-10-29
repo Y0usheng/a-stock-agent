@@ -403,8 +403,10 @@ async def run_market(
             if compare_prompts or compare_frameworks:
                 raise ValueError("新时序使用独立shadow首次输出，暂不混入旧协议同截面对照")
             from agent.after_close import run_after_close
-            return await run_after_close(host, shadow=shadow, research_symbols=research_symbols,
-                                         approve_plan=approve_plan, reject_plan=reject_plan, force=force)
+            from agent.runtime import positive_env
+            return await asyncio.wait_for(run_after_close(host, shadow=shadow, research_symbols=research_symbols,
+                                         approve_plan=approve_plan, reject_plan=reject_plan, force=force),
+                                         timeout=positive_env("ASTOCK_ANALYSIS_TIMEOUT", 600))
         m = MARKETS[market]
         print(f"\n{'='*12} {m['name']} ({market}) {'='*12}")
         print(f"已连接 MCP servers,共 {len(host.tools_schema)} 个工具")

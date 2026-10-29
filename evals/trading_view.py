@@ -78,6 +78,8 @@ def build_view(payload, ledger, logs, initial=1_000_000):
     latest = valid_logs[-1] if valid_logs else {}
     observations = [row.get("as_of_date") or row.get("date") for row in valid_logs]
     warnings = []
+    if latest.get("timing") and latest.get("execution_mode") == "shadow" and not latest.get("news_screen", {}).get("theme_discovery"):
+        warnings.append("本轮为固定受控公司样本验收，未由新闻发现流程自动入选；只分析，不代表建仓。")
     journal_ok = True
     actual_quantities = {row["symbol"]: row["shares"] for row in ledger["positions"]}
     try:
