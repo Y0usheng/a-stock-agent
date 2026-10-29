@@ -13,7 +13,7 @@ from evals.experiments import canonical_hash
 from servers.data_quality import event_time, market_close
 
 VERSION = "long-term-investment-v1"
-PROMPT_VERSION = "manager-long-v2"
+PROMPT_VERSION = "manager-long-v3"
 POLICY = {"version": VERSION, "thesis_horizon_years": 3, "evaluation_horizon_days": 252,
           "review_calendar_days": 90, "news_role": "thesis_change_monitor", "force_investment": False}
 CATEGORIES = {"business", "financials", "industry"}
@@ -21,7 +21,7 @@ RESEARCH_DB = DATA_DIR / "company_research.db"
 
 
 def is_long(version):
-    return version in {"manager-long-v1", PROMPT_VERSION}
+    return version in {"manager-long-v1", "manager-long-v2", PROMPT_VERSION}
 
 
 def case_variant(log):

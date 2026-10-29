@@ -12,6 +12,10 @@ from config import DEFAULT_PROMPT_VERSION
 
 
 PROMPT_VERSIONS = {
+    "manager-long-v3": {
+        "description": "AI自主模拟排单；复盘已到期结果，经时间验证后启用置信度校准。",
+        "suffix": "",
+    },
     "manager-long-v2": {
         "description": "收盘后真实信息截止、次交易日收盘限价模拟计划及受控PDF自动补证。",
         "suffix": "",

@@ -18,24 +18,38 @@ def _log_date(data: dict) -> str | None:
     return data.get("as_of_date") or data.get("date")
 
 
-def _load_past_logs(log_dir: Path, market: str, before_date: str) -> list[dict]:
+def _load_past_logs(log_dir: Path, market: str, before_date: str, include_after_close=False, cutoff_at=None) -> list[dict]:
     logs = []
-    for path in sorted(log_dir.glob(f"*.{market}.json")):
+    paths = list(log_dir.glob(f"*.{market}.json"))
+    if include_after_close:
+        paths += list((log_dir / "after_close").glob(f"*.{market}.json"))
+    for path in sorted(paths):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         log_date = _log_date(data)
-        if data.get("market") == market and log_date and log_date < before_date:
+        eligible = bool(log_date and log_date < before_date)
+        if include_after_close:
+            from evals.metrics import uses_synthetic_data
+            from servers.data_quality import event_time, market_close
+            if data.get("execution_mode") != "paper" or data.get("status") == "failed" or uses_synthetic_data(data):
+                continue
+            stamp = data.get("timing", {}).get("decision_at")
+            try:
+                eligible = (event_time(stamp, market) if stamp else market_close(log_date, market)) < event_time(cutoff_at, market) if cutoff_at else eligible
+            except (ValueError, TypeError):
+                continue
+        if data.get("market") == market and eligible:
             logs.append(data)
-    return logs
+    return sorted(logs, key=lambda row: row.get("generated_at") or _log_date(row))
 
 
 def build_memory_snapshot(market: str, before_date: str, log_dir: Path,
                           recent_trades: list[dict] | None = None,
-                          max_logs: int = 5, max_trades: int = 12) -> dict:
+                          max_logs: int = 5, max_trades: int = 12, *, include_after_close=False, cutoff_at=None) -> dict:
     """构建紧凑、可审计且严格早于 before_date 的记忆快照。"""
-    past = _load_past_logs(log_dir, market, before_date)[-max_logs:]
+    past = _load_past_logs(log_dir, market, before_date, include_after_close, cutoff_at)[-max_logs:]
     decisions = []
     predictions = []
     for log in past:
@@ -79,6 +93,9 @@ def build_memory_snapshot(market: str, before_date: str, log_dir: Path,
             "历史记录仅是待验证证据，不得机械重复旧交易；若当前行情与旧理由冲突，以当前数据和风控为准。"
         ),
     }
+    if include_after_close:
+        snapshot.update(memory_version="selective-formal-paper-v2", information_cutoff_at=cutoff_at,
+                        source_scope="formal_live_paper_logs; excludes_shadow_failed_synthetic")
     canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     snapshot["memory_id"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     return snapshot

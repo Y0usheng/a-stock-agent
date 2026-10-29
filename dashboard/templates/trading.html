@@ -8,6 +8,7 @@
 <section class="card section" style="margin-bottom:16px"><div class="heading"><h2>新闻 → 长期研究机会</h2><span class="badge" id="opportunityState">等待发现</span></div><div id="opportunities"></div></section>
 <div id="error"></div><div id="content" hidden>
 <section id="executionClock" class="card section" hidden><h2>研究时点与未来模拟成交</h2><div id="executionDetails"></div><div id="queuedOrders"></div></section>
+<section id="learningPanel" class="card section" hidden><h2>AI复盘与策略学习</h2><div id="learningDetails"></div></section>
 <div class="grid">
 <div class="card"><div class="muted">模拟总资产</div><div class="metric" id="assets"></div><div class="muted" id="cash"></div></div>
 <div class="card"><div class="muted">累计净盈亏 · 已扣成交费用</div><div class="metric" id="pnl"></div><div class="muted" id="return"></div></div>
@@ -55,11 +56,13 @@ function drawOpportunities(){
 }
 drawOpportunities();
 if(data.timing){
- const t=data.timing;$('executionClock').hidden=false;
+ const t=data.timing, autonomous=data.execution_policy==='autonomous-paper-execution-v1';$('executionClock').hidden=false;
  $('executionDetails').innerHTML=`<p>参考行情 ${esc(t.price_as_of_date)} · 信息截止 ${esc(t.information_cutoff_at)} · 判断完成 ${esc(t.decision_at||'—')}</p><p>计划执行：${esc(t.execution_session)} 收盘 · 确认期限 ${esc(t.approval_deadline)} · 价格偏离上限 ${number(t.max_price_deviation_pct*100,1)}%</p><p class="muted">下一交易日收盘后按已观察的不复权价格与预设滑点处理。未经事前确认、价格超限或行情缺失不会生成成交。页面不能批准交易。</p>`;
  const states={awaiting_confirmation:'待本机确认',confirmed:'已确认 · 等待未来交易日',executing:'执行结果待核对',filled:'模拟成交已登记',partially_filled:'部分模拟成交',cancelled:'条件未满足 · 已取消',rejected:'本机已取消',expired:'确认期限已过',blocked:'账户变化 · 需本机复核'};
+ if(autonomous){$('executionDetails').innerHTML=`<p>AI自主模拟 · 独立风控审核 · 无需逐笔人工确认</p><p>参考行情 ${esc(t.price_as_of_date)} · 信息截止 ${esc(t.information_cutoff_at)} · 判断完成 ${esc(t.decision_at||'—')}</p><p>计划执行 ${esc(t.execution_session)} 收盘 · 事前冻结期限 ${esc(t.approval_deadline)} · 价格偏离上限 ${number(t.max_price_deviation_pct*100,1)}%</p><p class="muted">使用未来交易日已观察的真实收盘价与预设滑点、费用；超时、价格超限、行情缺失或账户变化不会补造成交。</p>`;states.confirmed='AI已排定 · 等待未来交易日';states.expired='事前期限已过';}
  $('queuedOrders').innerHTML=(data.pending_orders||[]).map(o=>`<div class="summary"><b>${esc(o.symbol)} · ${esc(o.action)} ${esc(o.shares)} 股 · ${esc(states[o.status]||o.status)}</b><p>目标交易日 ${esc(o.execution_session)} · 参考价 ${money(o.reference_price)} · 状态记录 ${esc(o.state_recorded_at)}</p></div>`).join('');
 }
+if(data.learning){const l=data.learning;$('learningPanel').hidden=false;$('learningDetails').innerHTML=`<p>已到期样本 ${number(l.mature_samples,0)} · 待到期或缺价格 ${number(l.pending_samples,0)}</p><p>${l.active_parameter_version?'已有通过验证的置信度策略':'尚无通过验证的新策略，沿用原始判断'}</p><p class="muted">截止 ${esc(l.information_cutoff_at)}。校准代码须通过测试、时间顺序对照和回滚检查。252交易日预测未到期不计输赢，置信度改善不等于组合获利。</p>`;}
 function plot(id,series,{height=300,width=760,unit='',markers=[],hover=false}={}){
  const svg=$(id), all=series.flatMap(s=>s.points).filter(p=>p.value!=null), dates=[...new Set(all.map(p=>p.date))].sort();
  if(!all.length){svg.innerHTML='<text x="45" y="55">尚无可绘制的真实记录</text>';return;}
@@ -82,7 +85,7 @@ function draw(){const stock=data.stocks[Number($('stock').value)||0], rows=stock
  const tasks=(data.research_tasks||[]).filter(t=>t.symbol===stock.symbol&&['open','overdue'].includes(t.status));
  $('investment').innerHTML=investment?`<div class="summary"><b>${esc(intents[investment.position_intent]||investment.position_intent)}</b><p>三年投资逻辑 · 一年阶段观察 · 下次复核 ${esc(investment.next_review_date)}</p><p>${esc(investment.thesis)}</p><p>目标仓位 ${number(investment.target_weight*100)}%（计划，非实际持仓）</p><p>估值：悲观 ${money(investment.valuation.bear_price)} / 基准 ${money(investment.valuation.base_price)} / 乐观 ${money(investment.valuation.bull_price)}</p><p>建仓条件：${esc(investment.entry_condition)}</p><p>退出条件：${esc(investment.exit_condition)}</p></div>`:'<div class="note">长期协议已启用：三年投资逻辑、一年阶段观察、季度复核。当前下方仍是原始旧版分析，尚未生成新的长期判断。</div>';
  $('investment').innerHTML+=tasks.map(t=>`<div class="note ${t.status==='overdue'?'warning':''}"><b>${t.status==='overdue'?'补证逾期':'待补证'}</b> · ${esc(t.what_to_fetch)}<div>复核期限 ${esc(t.review_by)}</div></div>`).join('');
- $('decision').innerHTML=`<div class="summary"><b>${esc(stock.name)} <span class="muted">${esc(stock.symbol)}</span></b><p>${decision?esc(({BUY:'建议买入',SELL:'建议卖出',HOLD:'观望 HOLD'})[decision.action]||decision.action):'暂无分析记录'} · ${esc(data.analysis_date||'—')}</p></div>`+(decision?`<div class="summary"><b>判断依据</b><p>${esc(decision.reason)}</p></div>`:'')+(prediction?`<div class="summary"><b>${prediction.horizon_days===252?'一年阶段观察：':'旧版短期参考：'}未来${prediction.horizon_days}交易日${esc(direction[prediction.direction]||prediction.direction)}</b><p>模型原始置信度 ${number(prediction.confidence*100,0)}%，尚未校准；预测不是成交。</p></div>`:'');
+ $('decision').innerHTML=`<div class="summary"><b>${esc(stock.name)} <span class="muted">${esc(stock.symbol)}</span></b><p>${decision?esc(({BUY:'建议买入',SELL:'建议卖出',HOLD:'观望 HOLD'})[decision.action]||decision.action):'暂无分析记录'} · ${esc(data.analysis_date||'—')}</p></div>`+(decision?`<div class="summary"><b>判断依据</b><p>${esc(decision.reason)}</p></div>`:'')+(prediction?`<div class="summary"><b>${prediction.horizon_days===252?'一年阶段观察：':'旧版短期参考：'}未来${prediction.horizon_days}交易日${esc(direction[prediction.direction]||prediction.direction)}</b><p>模型原始置信度 ${number(prediction.confidence*100,0)}%${prediction.calibrated_confidence==null?'，尚未校准':` · 经历史验证校准 ${number(prediction.calibrated_confidence*100,0)}%`}；预测不是成交。</p></div>`:'');
  const position=data.positions.find(p=>p.symbol===stock.symbol);set('positionSummary',position?`${position.shares}股 · 含买入费用成本 ¥${number(position.avg_cost,4)} · 浮动盈亏 ${signed(position.unrealized_pnl)}元`:'当前未持有该股票。股价涨跌仅供观察，不计入账户收益。');
  plot('returnChart',[{color:'#57d6a0',lineWidth:2.6,points:data.portfolio_curve.map(p=>({date:p.date,value:p.cumulative_return_pct}))},{color:'#9ba6ba',dash:true,points:stock.tracking_benchmark.map(p=>({date:p.date,value:p.return_pct}))}],{width:1180,height:230,unit:'%'});
  set('returnNote',!data.portfolio.journal_reconciled?'账本无法完整对账，暂不绘制组合净收益，也不会把未确认的资金变化当作利润。':data.portfolio_curve.length<2?(data.portfolio.position_count?'目前仅有一个真实估值点，已按实际模拟持仓与成交费用估值，仍不足以评价策略表现。':'今天刚开始记录，目前仅有一个真实估值点。空仓净收益为0；此前股票历史走势不会补进Agent收益曲线。'):'同一起点比较：绿色为按实际模拟成交重建的净收益，灰色仅为观察股票的价格涨跌。未成交的分析建议不产生收益。');

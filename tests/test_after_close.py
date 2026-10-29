@@ -61,6 +61,39 @@ class AccountHost:
 
 
 class AfterCloseTests(unittest.TestCase):
+    def test_ai_plan_is_atomic_confirmed_and_executes_once_without_human_step(self):
+        from servers import account_server as account
+        from agent.order_queue import AI_PAPER_POLICY
+        context, result = example(True)
+        with subscription_workspace() as root, patch.object(account, "DB_PATH", None), patch.object(account, "date", FixedDate):
+            account.DB_PATH = root / "account.db"
+            queue = OrderQueue(root / "queue.db")
+            with patch("agent.order_queue.now", return_value=clock(DAY + "T17:40:00+08:00")):
+                identifier = queue.stage(result, timing(), context["account"], auto_confirm=True)
+                self.assertEqual(identifier, queue.stage(result, timing(), context["account"], auto_confirm=True))
+            self.assertEqual(len(queue.rows()), 1)
+            self.assertEqual(queue.rows()[0]["status"], "confirmed")
+            self.assertIsNotNone(queue.rows()[0]["approved_at"])
+            self.assertEqual(queue.public_state(DAY)[0]["execution_policy"], AI_PAPER_POLICY)
+            host = AccountHost()
+            self.assertEqual(asyncio.run(execute_due(host, queue, NEXT + "T14:30:00+08:00")), [])
+            self.assertEqual(self.run_due(queue, host)[0]["status"], "filled")
+            self.assertEqual(self.run_due(queue, host), [])
+            self.assertEqual(len(account.get_trades()), 1)
+            self.assertGreater(account.get_trades()[0]["fee"], 0)
+
+    def test_ai_cannot_bypass_risk_or_use_other_account_scope(self):
+        context, result = example(True)
+        with subscription_workspace() as root, patch("agent.order_queue.now", return_value=clock(DAY + "T17:40:00+08:00")):
+            queue = OrderQueue(root / "queue.db")
+            for key, value in [("market", "us"), ("currency", "USD"), ("initial_cash", 500.)]:
+                with self.assertRaises(ValueError):
+                    queue.stage(result, timing(), {**context["account"], key: value}, auto_confirm=True)
+            result["risk_review"] = {}
+            with self.assertRaises(ValueError):
+                queue.stage(result, timing(), context["account"], auto_confirm=True)
+            self.assertEqual(queue.rows(), [])
+
     def setup_queue(self, root):
         context, result = example(True)
         queue = OrderQueue(root / "queue.db")

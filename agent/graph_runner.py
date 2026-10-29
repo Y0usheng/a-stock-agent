@@ -35,6 +35,11 @@ class GraphState(TypedDict, total=False):
 
 
 def manager_instructions(market, as_of_date, symbols, version=None):
+    if version == "manager-long-v3":
+        return manager_instructions(market, as_of_date, symbols, "manager-long-v2").replace("未确认不成交", "独立风控与宿主检查通过才自动排定模拟成交") + (
+            "\n本轮为AI自主模拟：独立风控与宿主硬性规则通过后自动排定未来模拟计划，不要求用户逐笔确认。"
+            "learning_context仅为已到期结果的历史反馈，不是当前公司外部证据；未到期、失败或缺价格的判断不能算赢输。"
+            "参考历史误差与已验证校准信息更新判断，不机械照搬旧操作；策略校准代码由宿主经过测试、对照和回滚检查后更新，角色不得直接写代码或改风险上限、交易时点和证据门槛。")
     from agent.investment import is_long, manager_prompt
     if is_long(version):
         prompt = manager_prompt(market, as_of_date, symbols)
@@ -195,6 +200,11 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         "fundamentals": await host.call("candidate_fundamentals", {"symbols": host.active_symbols})}
     if getattr(host, "timing", None):
         current_context["timing"] = deepcopy(host.timing)
+    if getattr(host, "learning_context", None):
+        current_context["learning_context"] = deepcopy(host.learning_context)
+    if prompt_version == "manager-long-v3":
+        from agent.order_queue import AI_PAPER_POLICY
+        current_context["execution_policy"] = AI_PAPER_POLICY
     if long_term:
         identity = case_variant({"agent_sdk": {"prompt": manifest, "role_models": {name: asdict(role) for name, role in routing.items()}, "budget": subscription_config}})
         research = deepcopy(host.investment_context) if getattr(host, "investment_context", None) else await prepare_context(host, as_of_date, host.active_symbols, identity)
@@ -281,7 +291,7 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
                     timeout=positive_env("ASTOCK_ANALYSIS_TIMEOUT", 600))
                 awaiting = bool(state.get("__interrupt__"))
     except Exception as exc:
-        if prompt_version == "manager-long-v2" and subscription_roles is not None:
+        if prompt_version in {"manager-long-v2", "manager-long-v3"} and subscription_roles is not None:
             from agent.analysis import write_log
             from agent.trading_clock import now
             from config import LOG_DIR

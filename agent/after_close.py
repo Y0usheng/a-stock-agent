@@ -9,7 +9,7 @@ from agent.graph_runner import build_graph_manifest, run_agent_graph
 from agent.investment import PROMPT_VERSION, ResearchBook, case_variant, prepare_context
 from agent.memory import build_memory_snapshot
 from agent.opportunities import OpportunityBook, discover
-from agent.order_queue import OrderQueue, execute_due
+from agent.order_queue import AI_PAPER_POLICY, OrderQueue, execute_due
 from agent.sdk_runner import resolve_role_routing
 from agent.subscription import subscription_settings
 from agent.trading_clock import make_timing, now
@@ -18,7 +18,7 @@ from evals.experiments import canonical_hash
 from servers.data_quality import snapshot_date
 
 
-async def run_after_close(host, *, shadow=False, research_symbols=None, approve_plan=None, reject_plan=None, force=False):
+async def run_after_close(host, *, shadow=False, research_symbols=None, approve_plan=None, reject_plan=None, force=False, prompt_version=PROMPT_VERSION):
     queue = OrderQueue()
     if approve_plan or reject_plan:
         receipt = queue.confirm(approve_plan or reject_plan, approve=bool(approve_plan))
@@ -26,6 +26,9 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
         return receipt
     if force:
         raise ValueError("收盘后协议保留首次输出和队列，不支持强制覆盖")
+    if prompt_version == "manager-long-v3" and not shadow:
+        from agent.learning import review_cached
+        review_cached(now().isoformat())
     if not shadow:
         receipts = await execute_due(host, queue)
         if receipts:
@@ -42,7 +45,7 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     day = snapshot_date(probe)
     calendar = await host.call("trading_sessions", {})
     preliminary = make_timing(day, calendar["sessions"], calendar_hash=calendar["fingerprint"])
-    formal_path = LOG_DIR / "after_close" / (day + ".cn.json")
+    formal_path = LOG_DIR / "after_close" / (day + (".long-v3" if prompt_version == "manager-long-v3" else "") + ".cn.json")
     if formal_path.exists() and not shadow:
         return {"status": "skipped", "log_path": str(formal_path)}
     account = await host.call("get_account", {})
@@ -80,8 +83,8 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     prices = {row["symbol"]: row["close"] for row in snapshot}
     account = await host.call("get_account", {"current_prices": prices})
     recent = await host.call("get_trades", {"limit": 20})
-    memory = build_memory_snapshot("cn", day, LOG_DIR, recent)
-    manifest = build_graph_manifest("cn", day, active, PROMPT_VERSION, "subscription")
+    memory = build_memory_snapshot("cn", day, LOG_DIR, recent, include_after_close=prompt_version == "manager-long-v3", cutoff_at=preliminary["information_cutoff_at"] if prompt_version == "manager-long-v3" else None)
+    manifest = build_graph_manifest("cn", day, active, prompt_version, "subscription")
     metadata = {"agent_sdk": {"prompt": manifest, "role_models": {name: asdict(model) for name, model in resolve_role_routing().items()}, "budget": subscription_settings()}}
     path = shadow_log_path(LOG_DIR, day, "cn", metadata) if shadow else formal_path
     if path.exists():
@@ -90,24 +93,40 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     reader = AnalysisHost(host, snapshot, fundamentals, account, recent)
     reader.investment_context = await prepare_context(reader, day, active, case_variant(metadata))
     reader.timing = make_timing(day, calendar["sessions"], calendar_hash=calendar["fingerprint"])
-    result = await run_agent_graph(reader, "cn", day, memory, PROMPT_VERSION, require_confirmation=False, model_access="subscription")
+    learning = None
+    if prompt_version == "manager-long-v3":
+        from agent.learning import prepare, calibrate_predictions
+        learning = await prepare(reader, day, calendar["sessions"], reader.timing["information_cutoff_at"], shadow=shadow)
+        reader.learning_context = learning
+    result = await run_agent_graph(reader, "cn", day, memory, prompt_version, require_confirmation=False, model_access="subscription")
+    if learning:
+        calibrate_predictions(result, learning)
+        result["learning"] = learning
     validate_decision_result(result, "cn", expected_symbols=set(active))
     validate_risk_approval(result, "cn", set(active))
     dataset = reader.dataset(day, memory)
     result.update(date=day, as_of_date=day, market="cn", generated_at=now().isoformat(), timing=reader.timing,
-        run_id="cn:" + day + ":after-close-v2", active_symbols=active, input_dataset=dataset, dataset_fingerprint=canonical_hash(dataset),
+        run_id="cn:" + day + ":" + prompt_version, active_symbols=active, input_dataset=dataset, dataset_fingerprint=canonical_hash(dataset),
         account_snapshot=account, memory=memory, news_screen=screen, data_sources=sorted({row["data_source"] for row in snapshot}),
         collection_receipt=collection, execution_mode="shadow" if shadow else "paper",
         execution={"status": "analysis_only" if shadow else "no_orders", "orders_submitted": 0})
     result["timing"] = {**reader.timing, "decision_at": result["generated_at"]}
     if not shadow:
-        identifier = queue.stage(result, result["timing"], account)
+        autonomous = prompt_version == "manager-long-v3"
+        if autonomous:
+            result["execution_policy"] = AI_PAPER_POLICY
+        identifier = queue.stage(result, result["timing"], account, auto_confirm=autonomous)
         if identifier:
-            result.update(queue_plan_hash=identifier, execution_mode="pending", execution={"status": "awaiting_confirmation_for_future_session", "orders_submitted": 0})
-            pending = LOG_DIR / "pending" / (day + ".cn." + identifier[:16] + ".json")
-            write_log(pending, result)
-            print("未来收盘模拟计划待确认；执行日", reader.timing["execution_session"], "确认期限", reader.timing["approval_deadline"])
-            print("本机确认：.venv\\Scripts\\python agent/run_daily.py --market cn --approve-plan " + identifier)
+            result["queue_plan_hash"] = identifier
+            if autonomous:
+                result["execution"] = {"status": "ai_scheduled_for_future_session", "orders_submitted": 0}
+                print("AI模拟计划已自动排定；目标交易日", reader.timing["execution_session"], "；当前未成交。")
+            else:
+                result.update(execution_mode="pending", execution={"status": "awaiting_confirmation_for_future_session", "orders_submitted": 0})
+                pending = LOG_DIR / "pending" / (day + ".cn." + identifier[:16] + ".json")
+                write_log(pending, result)
+                print("未来收盘模拟计划待确认；执行日", reader.timing["execution_session"], "确认期限", reader.timing["approval_deadline"])
+                print("本机确认：.venv\\Scripts\\python agent/run_daily.py --market cn --approve-plan " + identifier)
         else:
             result["execution"]["status"] = "analysis_complete_no_trade_plan"
     write_log(path, result)

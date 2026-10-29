@@ -1,6 +1,6 @@
 # 收盘后研究、原始公告与未来模拟成交
 
-默认长期版本为 `manager-long-v2`，使用 `after-close-next-session-v1` 时间协议。旧 `manager-long-v1` 与既有实验日志保留原始含义，不将新材料回填为旧实验已知资料。
+默认长期版本为 `manager-long-v3`，使用 `after-close-next-session-v1` 时间协议，并在独立风控通过后自动排定模拟计划。旧v1/v2与既有实验日志保留原始含义，不将新材料回填为旧实验已知资料。[自主模拟与策略学习](AUTONOMOUS_PAPER_LEARNING.md)说明新默认行为。
 
 技术角色使用宿主计算的真实收盘、均线与RSI事实快照，明确标记零模型调用；基本面、投资经理、独立风控分别调用模型。新流程不把计算指标包装成第二份独立模型意见，通常用3次公司研究调用完成；预算上限仍为4次和40,000 tokens，超限或用量不完整的结果不得当成已通过实验。
 
@@ -18,13 +18,13 @@
 
 例如10月29日盘后形成的计划，最早安排真实日历中的下一交易日收盘。10月29日已经知道的收盘价只作参考，不登记成当日买入。确认不调用模型，也不立即成交；下一次本机运行读取指定执行日的原始收盘价，核验后才写入账本。
 
-## 人工确认与执行
+## AI自主模拟与旧版本确认
 
 正式入口仍为：
 
 ```powershell
 .venv\Scripts\python agent/run_daily.py --market cn
-# 出现买卖计划时，使用程序输出的完整计划哈希：
+# 新默认版本无需逐笔确认。下面仅用于既有v2待确认计划：
 .venv\Scripts\python agent/run_daily.py --market cn --approve-plan <完整计划哈希>
 # 取消未完成的计划：
 .venv\Scripts\python agent/run_daily.py --market cn --reject-plan <完整计划哈希>
