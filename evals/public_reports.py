@@ -207,7 +207,7 @@ def validate_report(report):
     datetime.fromisoformat(report["published_at"])
     numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence calibrated_confidence target_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct mature_samples pending_samples".split())
     containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing", "learning"}
-    string_arrays = {"warnings", "limitations", "selected_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols"}
+    string_arrays = {"warnings", "limitations", "selected_symbols", "risk_review_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols"}
     def check(value, key="", depth=0):
         if depth > 12:
             raise ValueError("公开报告嵌套超限")
