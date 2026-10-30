@@ -5,6 +5,7 @@ import asyncio
 from contextlib import contextmanager
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -106,12 +107,27 @@ def _stop_process(process):
     process.wait(timeout=3)
 
 
+def recovery_notice(event):
+    """Only a bounded CLI reconnect notice; never auth, quota, policy or final errors."""
+    if event.get("type") != "error" or not isinstance(event.get("message"), str):
+        return False
+    text = event["message"].lower()
+    match = re.match(r"reconnecting\.{3}\s*(\d+)\s*/\s*(\d+)\b", text)
+    if not match or not 1 <= int(match[1]) <= int(match[2]) <= 5:
+        return False
+    forbidden = ("401", "403", "429", "unauthorized", "auth", "token", "quota", "rate limit", "usage limit", "permission", "policy", "approval")
+    details = json.dumps(event, ensure_ascii=False).lower()
+    return (not any(word in details for word in forbidden) and
+            (bool(re.fullmatch(r"reconnecting\.{3}\s*\d+\s*/\s*\d+\s*", text)) or "stream disconnected" in text))
+
+
 def protocol_progress(path):
     """Only event counters leave the temporary output; never IDs, messages or stderr."""
     kinds = {"thread.started", "turn.started", "turn.completed", "turn.failed", "item.started", "item.updated", "item.completed", "error"}
     counts = {}
     items = {}
     terminal_usage = None
+    recoveries = 0
     phase = "no_protocol_events_observed"
     try:
         with Path(path).open("rb") as stream:
@@ -123,6 +139,7 @@ def protocol_progress(path):
                 continue
             kind = event.get("type") if isinstance(event, dict) else None
             if isinstance(kind, str) and kind in kinds:
+                recoveries += int(recovery_notice(event))
                 counts[kind] = counts.get(kind, 0) + 1
                 phase = kind
                 if kind.startswith("item.") and isinstance(event.get("item"), dict):
@@ -140,6 +157,7 @@ def protocol_progress(path):
     except OSError:
         phase = "diagnostic_unavailable"
     return {"phase": phase, "event_counts": counts, **({"item_type_counts": items} if items else {}),
+            **({"recovery_notices": recoveries} if recoveries else {}),
             **({"terminal_usage": terminal_usage} if terminal_usage else {})}
 
 
@@ -244,6 +262,7 @@ def _consume_worker_error(task):
 def parse_codex_events(stdout: str) -> tuple[dict, dict]:
     final = None
     usage = None
+    recoveries = 0
     for line in stdout.splitlines():
         if not line.strip():
             continue
@@ -254,6 +273,11 @@ def parse_codex_events(stdout: str) -> tuple[dict, dict]:
         if not isinstance(event, dict):
             raise RuntimeError("Codex 事件必须是对象")
         kind = event.get("type")
+        if recovery_notice(event):
+            recoveries += 1
+            if recoveries > 5 or usage is not None:
+                raise RuntimeError("订阅传输重连次数或事件顺序异常")
+            continue
         if kind in {"error", "turn.failed"}:
             raise RuntimeError("订阅调用失败（额度、认证或模型权限等问题）；未转用 API")
         if kind in {"item.started", "item.updated", "item.completed"}:
@@ -314,6 +338,8 @@ class SubscriptionClient:
                 "completed_calls": len(observed), "validated_calls": len(self.calls), "rejected_calls": len(self.rejected_calls),
                 "usage_complete": self.requests_started == len(observed),
                 "transport_attempts": list(self.transport_attempts),
+                "transport_recovery_notices": sum(row.get("recovery_notices", 0) for row in self.transport_attempts),
+                "retry_usage_scope": "terminal_usage_only; incomplete_connection_attempt_usage_unavailable",
                 "total_tokens": usage["input_tokens"] + usage["output_tokens"],
                 "budget_enforcement": "completed_calls_and_next_call_gate"}
 
