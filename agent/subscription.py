@@ -354,6 +354,8 @@ class SubscriptionClient:
             # Codex has request overhead beyond our prompt. Do not start another four-role
             # request when almost no budget remains; completed usage is still checked below.
             reserve = min(8000, self.settings["token_limit"] // 4)
+            if role == "risk-manager":
+                reserve = max([reserve] + [call["input_tokens"] for call in self.calls if call["role"] == "fundamental-analyst"])
             if self.settings["request_limit"] == 4 and self.calls and self.settings["token_limit"] - report["total_tokens"] < reserve:
                 raise RuntimeError("剩余订阅预算不足以保留下一角色开销，停止后续调用")
             if self._login is None:

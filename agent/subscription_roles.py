@@ -70,6 +70,31 @@ def _pick(row: dict, keys: tuple, text_limit: int = 300) -> dict:
             for key in keys if key in row and (row[key] is None or isinstance(row[key], (str, int, float, bool)))}
 
 
+def current_materials(rows):
+    selected = []
+    for category in ("business", "financials"):
+        candidates = sorted((row for row in rows if category in row["categories"]),
+                            key=lambda row: str(row.get("published_at") or ""), reverse=True)
+        if candidates and candidates[0] not in selected:
+            selected.append(candidates[0])
+    return selected
+
+
+def bounded_text_schema(schema):
+    value = deepcopy(schema)
+    def visit(node):
+        if isinstance(node, dict):
+            if node.get("type") == "string" and "enum" not in node and "maxLength" not in node:
+                node["maxLength"] = 160
+            for child in list(node.values()):
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+    visit(value)
+    return value
+
+
 def export_paper_context(context: dict, market: str, long_term=False) -> dict:
     """禁止通用账户对象、自由文本记忆及无关字段进入订阅输入。"""
     account = context["account"]
@@ -105,8 +130,9 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
         selected = []
         for symbol in context["symbols"]:
             material_rows = [row for row in research.get("materials", []) if row["symbol"] == symbol]
-            for row in select_materials(material_rows, 4):
-                text_limit = 1400 if context.get("timing") else 1200
+            chosen = current_materials(material_rows) if context.get("execution_policy") == "autonomous-paper-execution-v1" else select_materials(material_rows, 4)
+            for row in chosen:
+                text_limit = 400 if context.get("execution_policy") == "autonomous-paper-execution-v1" and row["categories"] == ["business"] else 1400 if context.get("timing") else 1200
                 item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
                 item["categories"] = [category for category in row["categories"] if category in {"business", "financials", "industry"}]
                 item["source_truth_verified"] = False
@@ -153,7 +179,8 @@ def subscription_manifest(manifest: dict) -> dict:
             "role_prompts": AFTER_CLOSE_ROLE_PROMPTS, "instructions": AFTER_CLOSE_EVIDENCE_INSTRUCTIONS,
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
-        value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1"})
+        value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
+            "company_projection": "latest-business-and-financial-originals-v1", "output_text_limit": 160, "manager_history_samples": 5})
     return value
 
 
@@ -226,8 +253,19 @@ class SubscriptionRoles:
                 if context.get("execution_policy") == "autonomous-paper-execution-v1":
                     payload["timing_boundary"] = "仅限本机模拟盘；AI提出计划，独立风控和宿主检查通过后自动排定，无需逐笔人工确认。行情日不等于决策时间，禁止按已知收盘价回填成交。只能使用截止前已观察资料，按未来交易日真实收盘价加预设滑点费用处理，超时、超限或缺行情不成交。"
         if context.get("timing"):
+            compact = context.get("execution_policy") == "autonomous-paper-execution-v1"
+            if compact:
+                payload["input_scope"] = "每家公司仅展示最新业务原文前400字与最新财务原文选段（保留完整选段及单位）；其他原件留本机，不表示已阅读或不存在风险。仅根据可见材料判断，旧期缺口单独披露。"
             # Full frozen catalog remains in the audit. These IDs bind the compact role presentation.
             for record in payload["evidence"]:
+                if compact:
+                    for key in ("url", "data_source"):
+                        record["data"].pop(key, None)
+                    if record["kind"] == "price_history" and name == "investment-manager":
+                        points = record["data"].get("monthly_observations", [])
+                        if len(points) > 5:
+                            record["data"]["monthly_observations"] = [points[round(i*(len(points)-1)/4)] for i in range(5)]
+                            record["data"]["presentation"] = "five_evenly_spaced_monthly_samples_and_recent_daily; full_history_retained_locally"
                 for key in ("material_id", "pdf_sha256", "page_text_hash", "capture_protocol", "data_quality", "extraction_status", "expires_at", "first_seen_at", "history_hash"):
                     record["data"].pop(key, None)
                 if record["kind"] == "price_history" and name == "risk-manager":
@@ -263,6 +301,8 @@ class SubscriptionRoles:
             schema = derived_link_schema(schema)
             if name in {"technical-analyst", "fundamental-analyst"}:
                 schema["properties"]["claims"].update(minItems=len(context["symbols"]), maxItems=len(context["symbols"]))
+            if context.get("execution_policy") == "autonomous-paper-execution-v1":
+                schema = bounded_text_schema(schema)
         result = await self.client.complete(prompt, schema, role=name)
         self.raw_outputs[name] = deepcopy(result)
         if context.get("timing"):
