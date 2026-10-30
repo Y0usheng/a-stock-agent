@@ -111,7 +111,8 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
             continue
         item = _pick(candidate, ("symbol", "article_count"))
         # 链接/哈希/时间戳不得按正文长度截断。
-        item["top_events"] = [_pick(row, EVENT_FIELDS, text_limit=1000) for row in candidate.get("top_events", [])[:2]]
+        news_limit = 1 if context.get("execution_policy") == "autonomous-paper-execution-v1" else 2
+        item["top_events"] = [_pick(row, EVENT_FIELDS, text_limit=1000) for row in candidate.get("top_events", [])[:news_limit]]
         news.append(item)
     # 仅保留以前模型的方向/概率，无历史理由、成交备注或用户自由文本。
     memory = context.get("memory", {})
@@ -155,6 +156,8 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
             result["learning_context"] = {**public_summary(learning), "raw_metrics": learning["raw_metrics"],
                 "evaluation": learning["evaluation"], "recent_outcomes": [_pick(row, ("symbol", "date", "outcome_date", "predicted", "actual", "correct", "confidence", "price_return_pct")) for row in learning["recent_outcomes"]],
                 "boundary": learning["boundary"]}
+            if context.get("execution_policy") == "autonomous-paper-execution-v1" and learning["mature_samples"] == 0 and not learning.get("active_parameter_version"):
+                result["learning_context"] = {**public_summary(learning), "boundary": "no_mature_outcomes; raw_confidence_unchanged"}
     return result
 
 
@@ -180,7 +183,8 @@ def subscription_manifest(manifest: dict) -> dict:
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
-            "company_projection": "latest-business-and-financial-originals-v1", "output_text_limit": 160, "manager_history_samples": 5})
+            "company_projection": "latest-business-and-financial-originals-v2", "output_text_limit": 160, "manager_history_samples": 5,
+            "company_news_per_symbol": 1, "empty_learning": "counts_only"})
     return value
 
 
@@ -255,7 +259,7 @@ class SubscriptionRoles:
         if context.get("timing"):
             compact = context.get("execution_policy") == "autonomous-paper-execution-v1"
             if compact:
-                payload["input_scope"] = "每家公司仅展示最新业务原文前400字与最新财务原文选段（保留完整选段及单位）；其他原件留本机，不表示已阅读或不存在风险。仅根据可见材料判断，旧期缺口单独披露。"
+                payload["input_scope"] = "每家公司仅展示最新业务原文前400字、最新财务完整选段及单位、1条公司新闻；其他原件和新闻留本机。仅根据可见材料判断，旧期缺口单独披露；未展示不表示不存在风险。"
             # Full frozen catalog remains in the audit. These IDs bind the compact role presentation.
             for record in payload["evidence"]:
                 if compact:

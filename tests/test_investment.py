@@ -71,6 +71,7 @@ class InvestmentTests(unittest.TestCase):
     def test_autonomous_context_keeps_latest_financial_units_and_bounded_business_original(self):
         context, _ = example()
         context['execution_policy'] = 'autonomous-paper-execution-v1'
+        context['news']['candidates'] = [{'symbol':'300750', 'top_events':[{'event_id':'latest','title':'latest'}, {'event_id':'older','title':'older'}]}]
         annual = {**material(), 'categories':['financials'], 'published_at':'2026-03-01', 'document_type':'annual'}
         interim = {**material(), 'categories':['financials'], 'published_at':'2026-08-31', 'document_type':'interim', 'excerpt':'单位：万元\n'+ '现金流 财务数据\n'*80, 'unit_context_present':True}
         business = {**material(), 'categories':['business'], 'excerpt':'原始业务内容'*200}
@@ -84,6 +85,8 @@ class InvestmentTests(unittest.TestCase):
         self.assertEqual(shown_business['excerpt'], business['excerpt'][:400])
         self.assertTrue(shown_business['excerpt_truncated'])
         self.assertEqual(len(context['investment_context']['materials']), 3)
+        self.assertEqual([r['event_id'] for r in projected['news'][0]['top_events']], ['latest'])
+        self.assertEqual(len(context['news']['candidates'][0]['top_events']), 2)
 
     def test_compact_projection_keeps_business_material_and_marks_truncation(self):
         context, _ = example()
