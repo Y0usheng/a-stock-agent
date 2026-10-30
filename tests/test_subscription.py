@@ -177,6 +177,16 @@ class SubscriptionTests(unittest.TestCase):
 
 
 class SubscriptionAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_risk_gate_reserves_observed_fundamental_input_cost(self):
+        client = SubscriptionClient('fixture')
+        client.requests_started = 2
+        client.calls = [{'role':'fundamental-analyst','input_tokens':12500,'output_tokens':500,'cached_input_tokens':0,'reasoning_output_tokens':None},
+                        {'role':'investment-manager','input_tokens':16000,'output_tokens':2500,'cached_input_tokens':0,'reasoning_output_tokens':None}]
+        with patch('agent.subscription.check_subscription_login') as login:
+            with self.assertRaisesRegex(RuntimeError, '预算不足'):
+                await client.complete('fixture', {}, role='risk-manager')
+            login.assert_not_called()
+
     async def test_rejected_response_preserves_known_terminal_usage_and_budget(self):
         client = SubscriptionClient('fixture')
         client._login = {'binary': 'fixture'}

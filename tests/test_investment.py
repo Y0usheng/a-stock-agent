@@ -68,6 +68,23 @@ def example(ready=True):
 
 
 class InvestmentTests(unittest.TestCase):
+    def test_autonomous_context_keeps_latest_financial_units_and_bounded_business_original(self):
+        context, _ = example()
+        context['execution_policy'] = 'autonomous-paper-execution-v1'
+        annual = {**material(), 'categories':['financials'], 'published_at':'2026-03-01', 'document_type':'annual'}
+        interim = {**material(), 'categories':['financials'], 'published_at':'2026-08-31', 'document_type':'interim', 'excerpt':'单位：万元\n'+ '现金流 财务数据\n'*80, 'unit_context_present':True}
+        business = {**material(), 'categories':['business'], 'excerpt':'原始业务内容'*200}
+        context['investment_context']['materials'] = [annual, interim, business]
+        projected = export_paper_context(context, 'cn', True)
+        self.assertEqual(len(projected['research_materials']), 2)
+        financial = next(r for r in projected['research_materials'] if r['categories']==['financials'])
+        self.assertEqual(financial['excerpt'], interim['excerpt'])
+        self.assertIn('万元', financial['excerpt'])
+        shown_business = next(r for r in projected['research_materials'] if r['categories']==['business'])
+        self.assertEqual(shown_business['excerpt'], business['excerpt'][:400])
+        self.assertTrue(shown_business['excerpt_truncated'])
+        self.assertEqual(len(context['investment_context']['materials']), 3)
+
     def test_compact_projection_keeps_business_material_and_marks_truncation(self):
         context, _ = example()
         financial = {**material(), "categories": ["financials"], "excerpt": "财务" * 1000}
