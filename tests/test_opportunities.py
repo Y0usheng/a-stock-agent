@@ -58,6 +58,17 @@ class FakeClient:
 
 
 class OpportunityTests(unittest.TestCase):
+    def test_risk_only_news_reserves_existing_slot_for_neutral_research(self):
+        leads, _ = route_feed(feed())
+        result = self.run_discovery(feed(), client=FakeClient(judgment(leads, 'risk')), limit=2,
+                                    baseline_symbols=['600036','600519'])
+        self.assertEqual(result['selected_symbols'], [])
+        self.assertEqual(result['baseline_review_symbols'], ['600036'])
+        self.assertEqual(len(result['active_symbols']), 2)
+        self.assertEqual(result['deferred_research_symbols'], ['300308'])
+        self.assertIn('600519', result['research_watchlist'])
+        self.assertEqual(result['orders_submitted'], 0)
+
     def test_resume_validated_frozen_review_spends_no_new_model_call(self):
         with subscription_workspace() as root:
             book = OpportunityBook(root / 'book.db')

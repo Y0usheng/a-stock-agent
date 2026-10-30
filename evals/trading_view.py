@@ -39,6 +39,22 @@ def read_ledger(path=MARKETS["cn"]["db"]):
                 "trades": [dict(row) for row in conn.execute("SELECT * FROM trades ORDER BY trade_date,id")], "exists": True}
 
 
+def tracking_symbols(logs, ledger, opportunity=None):
+    """Keep previously researched companies visible when today's focus changes."""
+    opportunity = opportunity or {}
+    allowed = {row["symbol"] for row in MARKETS["cn"]["candidate_universe"]}
+    symbols = set(MARKETS["cn"].get("investment_watchlist", []))
+    for log in logs:
+        if uses_synthetic_data(log):
+            continue
+        symbols.update(row["symbol"] for row in log.get("decisions", []))
+    symbols.update(opportunity.get("active_symbols", []))
+    symbols.update(opportunity.get("research_watchlist", []))
+    symbols.update(row["symbol"] for row in opportunity.get("forward_observations", []))
+    symbols.update(row["symbol"] for row in ledger.get("positions", []) + ledger.get("trades", []))
+    return sorted(symbols & allowed)
+
+
 def _journal(ledger, initial):
     cash, shares, basis, realized = initial, {}, {}, 0.
     for row in ledger["trades"]:
@@ -126,9 +142,19 @@ def build_view(payload, ledger, logs, initial=1_000_000):
                           "unrealized_pnl": round(value - cost, 2) if value is not None else None})
     names = {row["symbol"]: row["name"] for row in MARKETS["cn"]["candidate_universe"]}
     stocks = []
-    decisions = {row["symbol"]: row for row in latest.get("decisions", [])}
-    predictions = {row["symbol"]: row for row in latest.get("predictions", [])}
-    cases = {row["symbol"]: row for row in latest.get("investment_cases", [])}
+    decisions, predictions, cases, studied = {}, {}, {}, {}
+    # Each company keeps its own last judgment. Shadow research cannot replace a
+    # formal paper judgment on the same date; the actual ledger remains authoritative.
+    for log in sorted(valid_logs, key=lambda r: (r.get("as_of_date") or r.get("date", ""),
+                      {"paper": 2, "pending": 1}.get(r.get("execution_mode"), 0), r.get("generated_at", ""))):
+        for decision in log.get("decisions", []):
+            symbol = decision["symbol"]
+            decisions[symbol] = decision
+            predictions[symbol] = next((r for r in log.get("predictions", []) if r["symbol"] == symbol), None)
+            cases[symbol] = next((r for r in log.get("investment_cases", []) if r["symbol"] == symbol), None)
+            studied[symbol] = {"analysis_date": log.get("as_of_date") or log.get("date"),
+                               "decision_at": log.get("timing", {}).get("decision_at") or log.get("generated_at"),
+                               "research_mode": log.get("execution_mode", "unknown")}
     for symbol, rows in histories.items():
         frame = pd.DataFrame(rows)
         ma20, ma60 = frame["close"].rolling(20).mean(), frame["close"].rolling(60).mean()
@@ -142,6 +168,9 @@ def build_view(payload, ledger, logs, initial=1_000_000):
         if base is None:
             warnings.append(symbol + "缺少跟踪起点价格，不补造买入持有对照")
         stocks.append({"symbol": symbol, "name": names.get(symbol, symbol), "series": series,
+            **studied.get(symbol, {"analysis_date": None, "decision_at": None, "research_mode": "unreviewed"}),
+            "tracking_status": "held" if symbol in actual_quantities else "research_pending" if cases.get(symbol, {}) and cases[symbol].get("research_status") == "pending" else "observing" if symbol in decisions else "unreviewed",
+            "actual_weight": round(sum(p["market_value"] or 0 for p in positions if p["symbol"] == symbol) / points[-1]["total"], 6) if current_complete and points[-1]["total"] > 0 else None,
             "last_close": last["close"], "daily_change_pct": round((last["close"] / previous["close"] - 1) * 100, 3),
             "decision": decisions.get(symbol), "prediction": predictions.get(symbol),
             "investment_case": cases.get(symbol),

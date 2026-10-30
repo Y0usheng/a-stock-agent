@@ -51,9 +51,18 @@ def select_materials(rows, limit=4):
     selected = []
     for category in ("business", "financials", "industry"):
         candidates = [item for item in rows if category in item["categories"]]
+        if category == "financials":
+            usable = [item for item in candidates if item.get("unit_context_present") is not False]
+            candidates = usable or candidates
         row = next((item for item in candidates if category == "financials" and item.get("document_type") == "annual"), None) or next(iter(candidates), None)
         if row is not None and row not in selected:
             selected.append(row)
+        if category == "financials" and candidates and candidates[0] not in selected:
+            selected.append(candidates[0])
+        if category == "business":
+            targeted = max(candidates, key=lambda item: len(item.get("task_matches", [])), default=None)
+            if targeted and targeted.get("task_matches") and targeted not in selected:
+                selected.append(targeted)
     for row in rows:
         if row not in selected:
             selected.append(row)
@@ -64,6 +73,8 @@ LONG_INSTRUCTIONS = (
     "本轮为长期投资：形成约三年投资论证，252交易日预测仅作一年阶段观察，按季度复核，期限届满不自动卖出。"
     "业务、现金流/负债/盈利质量、竞争和估值为主；价格历史只辅助买入节奏与风险。"
     "新闻只判断原论证是否改变，没有新新闻不代表没有投资价值。"
+    "将受控候选和已有持仓按长期收益依据、估值、风险及证据充分性比较，同时说明继续持有现金的理由。"
+    "可以分批配置多家公司，仓位表达判断强弱；不能为凑持股数量强迫买入。核心事实缺失与正常的未来不确定性须区分。"
     "必须区分研究未完成(research_pending)、论证可用但价格不合适(wait_price)、建仓(build)、"
     "继续持有(hold)、减仓(reduce)、退出(exit)。辅助数据缺失记non_core_gaps，不得一概否决。"
     "核心业务/财务/估值缺口需明确what_to_fetch及重新评估条件，不能靠含糊HOLD无限拖延。"
@@ -308,6 +319,22 @@ class ResearchBook:
             conn.row_factory = sqlite3.Row
             return [{**json.loads(row["payload"]), "opened_at": row["opened_at"], "updated_at": row["updated_at"], "status": row["status"]}
                 for row in conn.execute("SELECT * FROM tasks ORDER BY symbol,category,id")]
+
+    def review_order(self, symbols, day, logs=()):
+        """Unreviewed companies first, then oldest review; no new model request."""
+        last = {}
+        if self.path.exists():
+            with closing(sqlite3.connect(f"file:{self.path.resolve().as_posix()}?mode=ro", uri=True)) as conn:
+                last = dict(conn.execute("SELECT symbol,MAX(day) FROM cases WHERE day<=? GROUP BY symbol", (day,)))
+        from evals.metrics import uses_synthetic_data
+        for log in logs:
+            stamp = (log.get("timing", {}).get("decision_at") or log.get("generated_at") or log.get("as_of_date") or log.get("date", ""))[:10]
+            if not stamp or stamp > day or uses_synthetic_data(log):
+                continue
+            for row in log.get("decisions", []):
+                last[row["symbol"]] = max(last.get(row["symbol"], ""), stamp)
+        allowed = {row["symbol"] for row in MARKETS["cn"]["candidate_universe"]}
+        return sorted((set(symbols) | set(last)) & allowed, key=lambda symbol: (last.get(symbol, ""), symbol))
 
 
 async def prepare_context(host, day, symbols, variant=None, book=None):

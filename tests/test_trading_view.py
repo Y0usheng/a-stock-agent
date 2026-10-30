@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from agent.subscription import subscription_workspace
 from evals.experiments import canonical_hash
-from evals.trading_view import analysis_logs, build_view, read_ledger, render_html
+from evals.trading_view import analysis_logs, build_view, read_ledger, render_html, tracking_symbols
 
 
 def fixture():
@@ -23,6 +23,30 @@ def fixture():
 
 
 class TradingViewTests(unittest.TestCase):
+    def test_previous_company_is_kept_with_its_own_date_when_focus_changes(self):
+        payload, ledger, logs = fixture()
+        payload['histories']['601899'] = deepcopy(payload['histories']['300750'])
+        payload['fingerprint'] = canonical_hash(payload['histories'])
+        logs[0]['as_of_date'] = '2026-10-23'
+        logs.append({**deepcopy(logs[0]), 'as_of_date':'2026-10-26', 'decisions':[{'symbol':'601899','action':'HOLD','shares':0}]})
+        view = build_view(payload, ledger, logs, 1000)
+        stocks = {r['symbol']:r for r in view['stocks']}
+        self.assertEqual(stocks['300750']['analysis_date'], '2026-10-23')
+        self.assertEqual(stocks['601899']['analysis_date'], '2026-10-26')
+        self.assertEqual(stocks['300750']['decision']['action'], 'HOLD')
+        self.assertEqual(view['positions'], [])
+        self.assertIn('300750', tracking_symbols(logs, ledger))
+        self.assertIn('601899', tracking_symbols(logs, ledger))
+
+    def test_unreviewed_stock_has_no_invented_manager_judgment(self):
+        payload, ledger, logs = fixture()
+        payload['histories']['601899'] = deepcopy(payload['histories']['300750'])
+        payload['fingerprint'] = canonical_hash(payload['histories'])
+        stock = build_view(payload, ledger, logs, 1000)['stocks'][1]
+        self.assertEqual(stock['tracking_status'], 'unreviewed')
+        self.assertIsNone(stock['decision'])
+        self.assertIsNone(stock['analysis_date'])
+
     def test_empty_book_does_not_invent_historical_pnl_or_buys(self):
         payload, ledger, logs = fixture()
         logs[0]["decisions"][0].update(action="BUY", shares=100)

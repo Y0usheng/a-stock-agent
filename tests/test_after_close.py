@@ -4,7 +4,7 @@ from datetime import date
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from agent.disclosures import select_passages, select_reports, download_pdf
 from agent.evidence import build_catalog
@@ -309,6 +309,55 @@ class AfterCloseTests(unittest.TestCase):
         business = next(row for row in select_passages(document, extracted) if row["categories"] == ["business"])
         self.assertEqual(business["pdf_page"], 2)
 
+    def test_requested_customer_risk_is_captured_beside_business_overview(self):
+        document = {'symbol':'300308','document_type':'annual'}
+        texts = ['公司代码300308'+'基本信息'*30,
+                 '二、报告期内公司从事的业务情况\n公司主要业务\n'+'业务说明\n'*50,
+                 '客户集中与竞争定价风险\n'+'客户及风险说明\n'*50]
+        extracted = {'pages':[{'pdf_page':i+1,'text':t,'text_hash':canonical_hash(t)} for i,t in enumerate(texts)]}
+        tasks = [{'category':'business','what_to_fetch':'核验客户集中和竞争定价'}]
+        selected = [r for r in select_passages(document, extracted, tasks) if r['categories']==['business']]
+        self.assertEqual({r['pdf_page'] for r in selected}, {2,3})
+        self.assertTrue(any('客户' in r['task_matches'] for r in selected))
+
+    def test_failed_annual_download_does_not_skip_next_report(self):
+        from agent.disclosures import collect
+        docs = [{'symbol':'300750','announcement_id':str(i),'document_type':kind}
+                for i,kind in enumerate(('annual','interim'))]
+        for d in docs:
+            d['url'] = 'https://static.cninfo.com.cn/fixture.pdf'
+        book = MagicMock()
+        book.tasks.return_value = []
+        with subscription_workspace() as root, patch('agent.disclosures.query_reports', return_value=docs), \
+             patch('agent.disclosures.download_pdf', side_effect=ValueError('fixture bounded failure')) as download:
+            receipt = collect(['300750'], book=book, root=root)
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(len(receipt['errors']), 2)
+        self.assertEqual({r['stage'] for r in receipt['errors']}, {'download'})
+
+    def test_oversized_declared_pdf_is_closed_before_reading(self):
+        from agent.disclosures import MAX_PDF
+        from time import monotonic
+        response = MagicMock(status_code=200, headers={'Content-Length':str(MAX_PDF+1)})
+        session = MagicMock()
+        session.get.return_value = response
+        with self.assertRaisesRegex(ValueError, '大小上限'):
+            download_pdf('https://static.cninfo.com.cn/fixture.pdf', session, monotonic()+5)
+        response.iter_content.assert_not_called()
+        response.close.assert_called_once()
+
+    def test_actual_financial_table_precedes_keyword_rich_explanation(self):
+        from agent.disclosures import financial_unit_visible
+        document = {'symbol':'300308','document_type':'annual'}
+        texts = ['公司代码300308'+'基本信息'*30,
+                 '主要会计数据\n单位：千元 币种：人民币\n2025年 2024年 2023年\n营业收入 100 90 80\n经营活动产生的现金流量净额 10 9 8\n'+'财务表说明\n'*10,
+                 '主要会计数据发生变动原因\n'+'营业收入 净利润 现金流量 资产总计 负债合计 合并现金流量表\n'*20]
+        extracted = {'pages':[{'pdf_page':i+1,'text':t,'text_hash':canonical_hash(t)} for i,t in enumerate(texts)]}
+        financial = next(r for r in select_passages(document, extracted) if r['categories']==['financials'])
+        self.assertEqual(financial['pdf_page'], 2)
+        self.assertTrue(financial['unit_context_present'])
+        self.assertFalse(financial_unit_visible('编制单位：某上市公司\n营业收入 100'))
+
     def test_nearly_exhausted_budget_stops_before_launching_risk_call(self):
         from agent.subscription import SubscriptionClient
         client = SubscriptionClient("fixture")
@@ -332,6 +381,24 @@ class AfterCloseTests(unittest.TestCase):
         self.assertIn(str(context["snapshot"][0]["close"]), result["claims"][0]["claim"])
         self.assertEqual(roles.client.requests_started, 0)
         self.assertEqual(roles.audit()["role_sources"]["technical-analyst"], "host_quote_indicator_facts_v1")
+
+    def test_compact_risk_input_preserves_complete_plan_and_cases(self):
+        from agent.graph_runner import manager_instructions
+        from agent.subscription_roles import SubscriptionRoles
+        context, log = example(True)
+        context.update(timing=timing(), execution_policy='autonomous-paper-execution-v1')
+        roles = SubscriptionRoles(context, 'cn', manager_instructions('cn',DAY,['300750'],'manager-long-v3'), 'unused', long_term=True)
+        captured = {}
+        async def capture(prompt, schema, **kwargs):
+            captured.update(json.loads(prompt.rsplit('\n',1)[-1]))
+            raise RuntimeError('captured_before_model')
+        roles.client.complete = capture
+        with self.assertRaisesRegex(RuntimeError, 'captured_before_model'):
+            asyncio.run(roles.call('risk-manager', json.dumps(log)))
+        self.assertEqual(captured['input']['decisions'], log['decisions'])
+        self.assertEqual(captured['input']['investment_cases'], log['investment_cases'])
+        self.assertNotIn('predictions', captured['input'])
+        self.assertEqual(roles.client.requests_started, 0)
 
     def test_discovery_timeout_stops_before_manager_instead_of_returning_skipped(self):
         from agent.after_close import run_after_close

@@ -57,10 +57,15 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     else:
         book = OpportunityBook()
         prior = book.latest() or {}
+        watched = list(dict.fromkeys(prior.get("research_watchlist", []) + prior.get("active_symbols", []) + MARKETS["cn"]["investment_watchlist"]))
+        from evals.trading_view import analysis_logs
+        baseline = ResearchBook().review_order(watched, day, analysis_logs())
         resume = os.environ.get("ASTOCK_RESUME_NEWS") or None
         feed = {"as_of_date": day, "information_cutoff_at": preliminary["information_cutoff_at"]} if resume else await asyncio.wait_for(host.call("market_discovery_feed", {"as_of_date": day, "after_close": True}), timeout=25)
-        discovery = await discover(feed, held=held, previous_symbols=prior.get("active_symbols", []), book=book, limit=2, resume_snapshot=resume)
+        discovery = await discover(feed, held=held, previous_symbols=prior.get("active_symbols", []), book=book, limit=2, resume_snapshot=resume, baseline_symbols=baseline)
         active = discovery["active_symbols"]
+        if discovery.get("review_error"):
+            raise RuntimeError("新闻主题评审失败，未形成有效候选判断；请检查发现记录，本轮未进入投资经理")
     if not active:
         if discovery and discovery.get("review_error"):
             raise RuntimeError("新闻主题评审失败，未形成有效候选判断；请检查发现记录，本轮未进入投资经理")
