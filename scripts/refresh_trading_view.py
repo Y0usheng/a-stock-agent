@@ -11,7 +11,7 @@ from agent.errors import safe_error
 from config import MARKETS
 from evals.experiments import canonical_hash
 from evals.price_data import normalize_history
-from evals.trading_view import PRICE_CACHE, analysis_logs, load_view, read_ledger, render_html
+from evals.trading_view import PRICE_CACHE, analysis_logs, load_view, read_ledger, render_html, tracking_symbols
 from servers.data_quality import completed_history, market_zone
 
 
@@ -33,7 +33,7 @@ def main():
         latest = logs[-1] if logs else {}
         from agent.opportunities import OpportunityBook
         opportunity = OpportunityBook().view()
-        symbols = args.symbols or sorted({row["symbol"] for row in latest.get("decisions", [])})
+        symbols = args.symbols or tracking_symbols(logs, ledger, opportunity)
         symbols = sorted(set(symbols) | set(opportunity.get("active_symbols", [])))
         if not args.symbols:
             symbols = sorted(set(symbols) | {row["symbol"] for row in opportunity.get("forward_observations", [])})

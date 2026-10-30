@@ -337,7 +337,7 @@ def normalize_wire_review(wire, leads):
     return result
 
 
-async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None, use_model=True, limit=3, resume_snapshot=None):
+async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None, use_model=True, limit=3, resume_snapshot=None, baseline_symbols=()):
     """Freeze sources and a separately budgeted one-call judgment; never sends an order."""
     if not 1 <= limit <= 6:
         raise ValueError("研究新候选上限须为1至6")
@@ -434,16 +434,32 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
     if error:
         mode = "retain_prior_research" if fallback or retained else "discovery_failed"
     active = list(dict.fromkeys(selected + risk_review + retained + fallback))
+    watchlist = list(dict.fromkeys([s for s in baseline_symbols if s in allowed] + selected + risk_review + retained + fallback))
+    baseline, deferred_symbols = [], []
+    if baseline_symbols and not error and not resumed:
+        # News does not exhaust the research mandate. When there are no endorsed
+        # beneficiaries, reserve one existing slot for a neutral company review.
+        neutral = [s for s in baseline_symbols if s in allowed and s not in selected + retained + risk_review]
+        if not selected and neutral:
+            deferred_symbols = risk_review[max(0, limit-1):]
+            risk_review = risk_review[:max(0, limit-1)]
+            fallback = []
+        occupied = list(dict.fromkeys(selected + risk_review + fallback))
+        baseline = neutral[:max(0, limit-len(occupied))]
+        active = list(dict.fromkeys(occupied + retained + baseline))
+        if baseline:
+            mode = "news_and_baseline_research" if selected or risk_review else "baseline_research"
     candidates = []
     for company in MARKETS["cn"]["candidate_universe"]:
         symbol = company["symbol"]
         related = [row for row in leads if symbol in row["possible_symbols"]]
         deferred = [row for row in deferred_leads if symbol in row["possible_symbols"]]
         chosen = [row for row in related if row["judgment"] and row["judgment"]["assessment"] == "research_priority" and symbol in row["judgment"]["beneficiary_symbols"]]
-        state = "held" if symbol in retained else "selected_for_research" if symbol in selected else "selected_for_risk_review" if symbol in risk_review else "retained_research" if symbol in fallback else "deferred_budget" if chosen or deferred and not related else "not_selected"
+        state = "held" if symbol in retained else "selected_for_research" if symbol in selected else "selected_for_risk_review" if symbol in risk_review else "baseline_research" if symbol in baseline else "retained_research" if symbol in fallback else "deferred_budget" if symbol in deferred_symbols or chosen or deferred and not related else "not_selected"
         reason = ("保留已有持仓，新闻空缺不触发卖出" if state == "held" else
                   "优先主题提出的受益假设，仍待公司披露和估值核验" if state == "selected_for_research" else
                   "模型识别行业风险；宿主按受控映射安排公司暴露核验，业务关联未证实，不是受益推荐或交易批准" if state == "selected_for_risk_review" else
+                  "持续观察名单按未研究/最久未复核顺序轮转；无新闻受益背书，仍须公司资料、估值及独立风控" if state == "baseline_research" else
                   "本轮没有通过的新主题，延续已有研究" if state == "retained_research" else
                   ("匹配主题因本轮评审预算延后，尚未评价公司" if deferred and not related else "受单轮新增研究数量上限限制") if state == "deferred_budget" else
                   "主题未获模型优先研究判断，或公司未被选为待核验受益方" if related else "本轮受控来源没有匹配主题，未评价公司长期价值")
@@ -455,6 +471,7 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
         "refresh_receipt": feed.get("refresh_receipt"),
         "omitted_theme_ids": omitted, "excluded_events": excluded, "selection_mode": mode,
         "selected_symbols": selected, "risk_review_symbols": risk_review, "retained_symbols": retained, "active_symbols": active,
+        "research_watchlist": watchlist, "baseline_review_symbols": baseline, "deferred_research_symbols": deferred_symbols,
         "candidates": candidates, "usage": usage, "review_error": error, "review_cached": cached,
         "new_candidate_limit": limit, "orders_submitted": 0,
         "limitations": ["公开快讯与导入资料仅部分覆盖市场，未做全市场优胜排名", "公司映射和媒体语义仍须核对，模型假设不等于事实", "只有在行情截止前已采集的资料可进入本轮，禁止回填历史知识", "研究优先级不替代公司披露、估值及风控；来源数量不是收益概率"]}

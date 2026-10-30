@@ -17,6 +17,17 @@ def rehash(report):
 
 
 class PublicReportTests(unittest.TestCase):
+    def test_legacy_case_remains_valid_and_new_watch_metadata_is_filtered(self):
+        legacy = {'status':'ready','stocks':[{'symbol':'300750','investment_case':{'symbol':'300750','valuation':{}}}]}
+        old = sanitize_view(legacy)
+        self.assertNotIn('core_gaps', old['stocks'][0]['investment_case'])
+        self.assertEqual(old, sanitize_view(old))
+        legacy['stocks'][0].update(analysis_date='2026-10-23', tracking_status='research_pending', actual_weight=0., private_context='private')
+        legacy['stocks'][0]['investment_case']['core_gaps'] = [{'category':'business','reason':'missing source','what_to_fetch':'annual report','source_case_hash':'private'}]
+        public = sanitize_view(legacy)
+        self.assertEqual(public['stocks'][0]['analysis_date'], '2026-10-23')
+        self.assertNotIn('private', json.dumps(public))
+        self.assertEqual(public, sanitize_view(public))
     def test_learning_and_ai_policy_whitelist_excludes_code_parameters_and_order_ids(self):
         view = sanitize_view({'status': 'ready', 'execution_policy': 'autonomous-paper-execution-v1',
             'learning': {'version': 'paper-outcome-learning-v1', 'status': 'insufficient_data', 'mature_samples': 0,

@@ -68,6 +68,13 @@ def example(ready=True):
 
 
 class InvestmentTests(unittest.TestCase):
+    def test_research_rotation_counts_old_shadow_review_but_not_future_or_synthetic(self):
+        with subscription_workspace() as root:
+            book = ResearchBook(root/'research.db')
+            logs = [{'date':'2026-10-28','decisions':[{'symbol':'300750'}]},
+                    {'date':'2026-11-02','decisions':[{'symbol':'600036'}]},
+                    {'date':'2026-10-29','offline':True,'decisions':[{'symbol':'600519'}]}]
+            self.assertEqual(book.review_order(['300750','600036','600519'], DAY, logs), ['600036','600519','300750'])
     def test_autonomous_context_keeps_latest_financial_units_and_bounded_business_original(self):
         context, _ = example()
         context['execution_policy'] = 'autonomous-paper-execution-v1'
@@ -77,16 +84,25 @@ class InvestmentTests(unittest.TestCase):
         business = {**material(), 'categories':['business'], 'excerpt':'原始业务内容'*200}
         context['investment_context']['materials'] = [annual, interim, business]
         projected = export_paper_context(context, 'cn', True)
-        self.assertEqual(len(projected['research_materials']), 2)
-        financial = next(r for r in projected['research_materials'] if r['categories']==['financials'])
-        self.assertEqual(financial['excerpt'], interim['excerpt'])
+        self.assertEqual(len(projected['research_materials']), 3)
+        financial = next(r for r in projected['research_materials'] if r.get('document_type')=='interim')
+        self.assertEqual(financial['excerpt'], interim['excerpt'][:450])
         self.assertIn('万元', financial['excerpt'])
         shown_business = next(r for r in projected['research_materials'] if r['categories']==['business'])
-        self.assertEqual(shown_business['excerpt'], business['excerpt'][:400])
+        self.assertEqual(shown_business['excerpt'], business['excerpt'][:200])
         self.assertTrue(shown_business['excerpt_truncated'])
         self.assertEqual(len(context['investment_context']['materials']), 3)
         self.assertEqual([r['event_id'] for r in projected['news'][0]['top_events']], ['latest'])
         self.assertEqual(len(context['news']['candidates'][0]['top_events']), 2)
+
+    def test_task_passage_is_presented_without_fabricating_a_summary(self):
+        from agent.subscription_roles import current_materials, material_excerpt
+        overview = {**material(), 'categories': ['business'], 'excerpt': '业务说明'*200}
+        targeted = {**overview, 'excerpt': '背景\n' + '其他文字'*200 + '\n客户集中风险及竞争定价说明。'*30, 'task_matches': ['客户', '竞争']}
+        self.assertIn(targeted, current_materials([overview, targeted]))
+        shown = material_excerpt(targeted, 450)
+        self.assertIn('客户集中风险', shown)
+        self.assertIn(shown, targeted['excerpt'])
 
     def test_compact_projection_keeps_business_material_and_marks_truncation(self):
         context, _ = example()

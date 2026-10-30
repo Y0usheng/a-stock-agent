@@ -16,20 +16,30 @@ from config import DATA_DIR, MARKETS, ROOT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
-VERSION = "controlled-pdf-capture-v4"
+VERSION = "controlled-pdf-capture-v5"
 HOME = DATA_DIR / "disclosures"
-MAX_PDF = 40_000_000
-UNITS = re.compile(r"单位\s*[：:][^\n]{1,45}|营业收入\s*[（(](?:元|千元|万元|百万元)[）)]")
+MAX_PDF = 80_000_000
+UNITS = re.compile(r"(?<!编制)单位\s*[：:]\s*(?:人民币)?(?:百万元|千元|万元|亿元|元)[^\n]{0,25}|营业收入\s*[（(](?:元|千元|万元|百万元)[）)]")
 TERMS = {
     "business": ("主要业务", "主营业务", "经营模式", "核心竞争力", "主要风险", "Business overview"),
     "financials": ("主要会计数据", "营业收入", "经营活动产生的现金流量净额", "资产总计", "负债合计", "合并现金流量表", "Revenue", "Cash flow"),
 }
+TASK_TERMS = {
+    "business": ("客户", "集中", "竞争", "定价", "产品", "成本", "产能", "产量", "储量", "套保", "风险"),
+    "financials": ("现金流", "现金流量", "负债", "应收", "存货", "资本开支", "股本", "每股收益", "营业收入", "净利润"),
+}
+
+
+def task_terms(tasks, category):
+    requested = " ".join(str(row.get("what_to_fetch", "")) + str(row.get("reason", ""))
+                         for row in tasks if row.get("category") == category and row.get("status") != "resolved")
+    return tuple(term for term in TASK_TERMS[category] if term in requested)
 
 
 def financial_unit_visible(text):
     # A unit from a later, unrelated table cannot label the first financial table.
     inline = re.search(r"营业收入\s*[（(](?:元|千元|万元|百万元)[）)]", text)
-    first_value = re.search(r"营业收入|利润总额|净利润|资产总计|总资产|负债合计|经营活动产生", text)
+    first_value = re.search(r"营业收入|利润总额|净利润|资产总计|总资产|负债合计|经营活动产生|货币资金|应收账款|存货", text)
     units = UNITS.search(text)
     return bool(first_value and ((inline and inline.start() == first_value.start()) or (units and units.start() < first_value.start())))
 
@@ -60,6 +70,8 @@ def select_reports(rows, symbol, cutoff):
         path = str(row.get("adjunctUrl", ""))
         if row.get("secCode") != symbol or any(word in title for word in ("摘要", "英文", "取消", "更正", "修订说明")):
             continue
+        if not re.search(r"(?:年度|季度)报告", title):
+            continue
         if not re.fullmatch(r"finalpage/\d{4}-\d{2}-\d{2}/\d+\.[Pp][Dd][Ff]", path):
             continue
         published = datetime.fromtimestamp(float(row["announcementTime"]) / 1000, timezone.utc).astimezone(event_time(cutoff, "cn").tzinfo)
@@ -88,10 +100,14 @@ def download_pdf(url, session, deadline):
         response.raise_for_status()
         parts, size = [], 0
         try:
+            if int(response.headers.get("Content-Length") or 0) > MAX_PDF:
+                raise ValueError("PDF超出大小上限")
             for part in response.iter_content(65536):
                 size += len(part)
-                if size > MAX_PDF or monotonic() >= deadline:
-                    raise ValueError("PDF超出大小或总时限")
+                if size > MAX_PDF:
+                    raise ValueError("PDF超出大小上限")
+                if monotonic() >= deadline:
+                    raise ValueError("PDF超出总时限")
                 parts.append(part)
         finally:
             response.close()
@@ -117,12 +133,13 @@ def extract_pages(path):
     return {"pages": pages, "page_count": len(pages), "extractor": "pypdf", "semantic_verified": False}
 
 
-def select_passages(document, extracted):
+def select_passages(document, extracted, tasks=()):
     identity_text = "".join(page["text"] for page in extracted["pages"][:3])
     if document["symbol"] not in re.sub(r"\s+", "", identity_text):
         raise ValueError("PDF前页未找到对应股票代码，不能自动绑定公司")
     selected = []
     for category, terms in TERMS.items():
+        requested = task_terms(tasks, category)
         if category == "business" and document["document_type"] != "annual":
             continue
         scored = []
@@ -130,7 +147,7 @@ def select_passages(document, extracted):
             text = page["text"]
             if "目录" in text[:180] or text.count("\ufffd") > max(2, len(text) * .01):
                 continue
-            hits = [text.find(term) for term in terms if term in text]
+            hits = [text.find(term) for term in terms + requested if term in text]
             if not hits:
                 continue
             # Prefer a compact page with several relevant labels, not isolated keyword density.
@@ -148,8 +165,26 @@ def select_passages(document, extracted):
             excerpt = text[start:end].strip()
             if len(excerpt) < 100:
                 continue
+            if category == "financials" and financial_unit_visible(excerpt):
+                score += 100
+                if "主要会计数据" in excerpt:
+                    score += 100
+            # At most one additional source passage addresses a specific outstanding task.
             scored.append((score, -page["pdf_page"], page, start, end, excerpt))
-        for _, _, page, start, end, excerpt in sorted(scored, key=lambda row: (row[0], row[1]), reverse=True)[:1]:
+        ranked = sorted(scored, key=lambda row: (row[0], row[1]), reverse=True)
+        chosen = ranked[:1]
+        if requested:
+            targeted = sorted(scored, key=lambda row: (sum(term in row[2]["text"] for term in requested), row[0], row[1]), reverse=True)
+            if targeted and targeted[0] not in chosen and any(term in targeted[0][2]["text"] for term in requested):
+                _, _, page, _, _, _ = targeted[0]
+                # Centre on the requested issue instead of another early generic keyword.
+                start = max(0, min(page["text"].find(term) for term in requested if term in page["text"]) - 180)
+                boundary = page["text"].rfind("\n", 0, start) + 1
+                if start - boundary < 100:
+                    start = boundary
+                end = min(len(page["text"]), start + 1100)
+                chosen.append((0, 0, page, start, end, page["text"][start:end].strip()))
+        for _, _, page, start, end, excerpt in chosen:
             spans = [{"pdf_page": page["pdf_page"], "start": start, "end": end, "page_text_hash": page["text_hash"]}]
             anchor = ""
             if category == "financials" and not financial_unit_visible(excerpt) and page["pdf_page"] > 1:
@@ -172,7 +207,8 @@ def select_passages(document, extracted):
                 "source_truth_verified": False, "capture_protocol": VERSION, "source_spans": spans,
                 "unit_context_present": financial_unit_visible(excerpt) if category == "financials" else None,
                 "extraction_status": "source_spans_units_checked_semantics_unverified",
-                "page_excerpt_complete": start == 0 and end == len(page["text"]), "report_period": None})
+                "page_excerpt_complete": start == 0 and end == len(page["text"]), "report_period": None,
+                "task_matches": [term for term in requested if term in excerpt]})
     return selected
 
 
@@ -193,53 +229,65 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
         if monotonic() >= deadline:
             receipt["errors"].append({"symbol": symbol, "reason": "total_budget_exhausted"})
             continue
+        stage = "index"
+        tasks = [row for row in book.tasks() if row.get("symbol") == symbol]
+        if not tasks:
+            tasks = [{"category": category, "what_to_fetch": " ".join(terms)} for category, terms in TASK_TERMS.items()]
         try:
             metadata = root / (symbol + ".index.json")
             cached = json.loads(metadata.read_text(encoding="utf-8")) if metadata.exists() else None
-            if cached and (now() - event_time(cached["fetched_at"], "cn")).total_seconds() < 86400:
+            if cached and cached.get("protocol") == VERSION and (now() - event_time(cached["fetched_at"], "cn")).total_seconds() < 86400:
                 documents = cached["documents"]
             else:
                 documents = query_reports(symbol, cutoff, session)
                 from agent.analysis import write_log
-                write_log(metadata, {"fetched_at": now().isoformat(), "documents": documents})
+                write_log(metadata, {"protocol": VERSION, "fetched_at": now().isoformat(), "documents": documents})
             if not documents:
                 raise ValueError("没有符合时点的年报或季报")
             for document in documents:
-                if deadline - monotonic() < 3:
-                    receipt["errors"].append({"symbol": symbol, "reason": "total_budget_exhausted"})
-                    break
-                reference = root / (document["announcement_id"] + ".capture.json")
-                if reference.exists():
-                    capture = json.loads(reference.read_text(encoding="utf-8"))
-                    digest = capture["pdf_sha256"]
-                    pdf_path = root / (digest + ".pdf")
-                    if hashlib.sha256(pdf_path.read_bytes()).hexdigest() != digest:
-                        raise ValueError("PDF原件已被改写")
-                else:
-                    data = download_pdf(document["url"], session, deadline)
-                    digest = hashlib.sha256(data).hexdigest()
-                    pdf_path = root / (digest + ".pdf")
-                    if not pdf_path.exists():
-                        pdf_path.write_bytes(data)
-                    capture = {**document, "pdf_sha256": digest, "first_downloaded_at": now().isoformat(), "byte_count": len(data)}
-                    from agent.analysis import write_log
-                    write_log(reference, capture)
-                text_path = root / (digest + ".pages.json")
-                if not text_path.exists() or not capture.get("pages_sha256"):
-                    subprocess.run([sys.executable, str(ROOT / "scripts" / "collect_disclosures.py"), "--extract-worker", str(pdf_path), str(text_path)],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=max(1, min(35, deadline-monotonic())))
-                    capture["pages_sha256"] = hashlib.sha256(text_path.read_bytes()).hexdigest()
-                    from agent.analysis import write_log
-                    write_log(reference, capture)
-                if hashlib.sha256(text_path.read_bytes()).hexdigest() != capture["pages_sha256"]:
-                    raise ValueError("PDF提取文本缓存已被改写")
-                extracted = json.loads(text_path.read_text(encoding="utf-8"))
-                passages = select_passages(document, extracted)
-                identifiers = [book.add_material({**passage, "pdf_sha256": digest, "first_downloaded_at": capture["first_downloaded_at"]})["material_id"] for passage in passages]
-                receipt["documents"].append({**document, "pdf_sha256": digest, "page_count": extracted["page_count"], "material_ids": identifiers,
-                                             "captured_categories": sorted({category for p in passages for category in p["categories"]})})
+                try:
+                    stage = "download"
+                    if deadline - monotonic() < 3:
+                        receipt["errors"].append({"symbol": symbol, "reason": "total_budget_exhausted"})
+                        break
+                    reference = root / (document["announcement_id"] + ".capture.json")
+                    if reference.exists():
+                        capture = json.loads(reference.read_text(encoding="utf-8"))
+                        digest = capture["pdf_sha256"]
+                        pdf_path = root / (digest + ".pdf")
+                        if hashlib.sha256(pdf_path.read_bytes()).hexdigest() != digest:
+                            raise ValueError("PDF原件已被改写")
+                    else:
+                        data = download_pdf(document["url"], session, deadline)
+                        digest = hashlib.sha256(data).hexdigest()
+                        pdf_path = root / (digest + ".pdf")
+                        if not pdf_path.exists():
+                            pdf_path.write_bytes(data)
+                        capture = {**document, "pdf_sha256": digest, "first_downloaded_at": now().isoformat(), "byte_count": len(data)}
+                        from agent.analysis import write_log
+                        write_log(reference, capture)
+                    text_path = root / (digest + ".pages.json")
+                    stage = "extract"
+                    if not text_path.exists() or not capture.get("pages_sha256"):
+                        subprocess.run([sys.executable, str(ROOT / "scripts" / "collect_disclosures.py"), "--extract-worker", str(pdf_path), str(text_path)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=max(1, min(35, deadline-monotonic())))
+                        capture["pages_sha256"] = hashlib.sha256(text_path.read_bytes()).hexdigest()
+                        from agent.analysis import write_log
+                        write_log(reference, capture)
+                    if hashlib.sha256(text_path.read_bytes()).hexdigest() != capture["pages_sha256"]:
+                        raise ValueError("PDF提取文本缓存已被改写")
+                    extracted = json.loads(text_path.read_text(encoding="utf-8"))
+                    stage = "select_passages"
+                    passages = select_passages(document, extracted, tasks)
+                    identifiers = [book.add_material({**passage, "pdf_sha256": digest, "first_downloaded_at": capture["first_downloaded_at"]})["material_id"] for passage in passages]
+                    receipt["documents"].append({**document, "pdf_sha256": digest, "page_count": extracted["page_count"], "material_ids": identifiers,
+                                                 "captured_categories": sorted({category for p in passages for category in p["categories"]}),
+                                                 "task_matches": sorted({term for p in passages for term in p.get("task_matches", [])})})
+                except Exception as exc:
+                    receipt["errors"].append({"symbol": symbol, "announcement_id": document["announcement_id"],
+                        "reason": type(exc).__name__ + ": controlled_source_capture_failed", "stage": stage})
         except Exception as exc:
-            receipt["errors"].append({"symbol": symbol, "reason": type(exc).__name__ + ": controlled_source_capture_failed"})
+            receipt["errors"].append({"symbol": symbol, "reason": type(exc).__name__ + ": controlled_source_capture_failed", "stage": stage})
     session.close()
     receipt["elapsed_seconds"] = round(budget_seconds - max(0, deadline-monotonic()), 3)
     from agent.analysis import write_log

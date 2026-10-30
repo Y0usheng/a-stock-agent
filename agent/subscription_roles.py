@@ -75,9 +75,36 @@ def current_materials(rows):
     for category in ("business", "financials"):
         candidates = sorted((row for row in rows if category in row["categories"]),
                             key=lambda row: str(row.get("published_at") or ""), reverse=True)
+        if category == "financials":
+            usable = [row for row in candidates if row.get("unit_context_present") is not False]
+            candidates = usable or candidates
         if candidates and candidates[0] not in selected:
             selected.append(candidates[0])
+        if category == "business":
+            targeted = sorted(candidates, key=lambda row: len(row.get("task_matches", [])), reverse=True)
+            if targeted and targeted[0].get("task_matches") and targeted[0] not in selected:
+                selected.append(targeted[0])
+        else:
+            annual = next((row for row in candidates if row.get("document_type") == "annual"), None)
+            if annual and annual not in selected:
+                selected.append(annual)
     return selected
+
+
+def material_excerpt(row, limit):
+    """Select a contiguous source window, never a generated business summary."""
+    text = row.get("excerpt", "")
+    if len(text) <= limit:
+        return text
+    start = 0
+    if row.get("categories") == ["business"] and row.get("task_matches"):
+        hits = [text.find(term) for term in row["task_matches"] if term in text]
+        if hits:
+            start = max(0, min(hits) - 100)
+            boundary = text.rfind("\n", 0, start) + 1
+            if start - boundary < 100:
+                start = boundary
+    return text[start:start + limit]
 
 
 def bounded_text_schema(schema):
@@ -133,8 +160,15 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
             material_rows = [row for row in research.get("materials", []) if row["symbol"] == symbol]
             chosen = current_materials(material_rows) if context.get("execution_policy") == "autonomous-paper-execution-v1" else select_materials(material_rows, 4)
             for row in chosen:
-                text_limit = 400 if context.get("execution_policy") == "autonomous-paper-execution-v1" and row["categories"] == ["business"] else 1400 if context.get("timing") else 1200
+                compact = context.get("execution_policy") == "autonomous-paper-execution-v1"
+                text_limit = (650 if row["categories"] == ["business"] else 950) if compact else 1400 if context.get("timing") else 1200
+                if compact and len(chosen) > 2:
+                    text_limit = (200 if row["categories"] == ["business"] else 450)
                 item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
+                item["excerpt"] = material_excerpt(row, text_limit)
+                if compact and row.get("categories") == ["financials"]:
+                    from agent.disclosures import financial_unit_visible
+                    item["unit_context_present"] = financial_unit_visible(item["excerpt"])
                 item["categories"] = [category for category in row["categories"] if category in {"business", "financials", "industry"}]
                 item["source_truth_verified"] = False
                 item["excerpt_truncated"] = len(row.get("excerpt", "")) > text_limit
@@ -183,7 +217,7 @@ def subscription_manifest(manifest: dict) -> dict:
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
-            "company_projection": "latest-business-and-financial-originals-v2", "output_text_limit": 160, "manager_history_samples": 5,
+            "company_projection": "task-directed-business-and-annual-interim-originals-v3", "output_text_limit": 160, "manager_history_samples": 5,
             "company_news_per_symbol": 1, "empty_learning": "counts_only"})
     return value
 
@@ -231,6 +265,8 @@ class SubscriptionRoles:
                  {"market_snapshot", "fundamentals", "news"})
         if self.long_term:
             kinds |= ({"price_history"} if name == "technical-analyst" else {"company_document", "market_snapshot"} if name == "fundamental-analyst" else {"company_document", "price_history"})
+        if context.get("execution_policy") == "autonomous-paper-execution-v1" and name in {"investment-manager", "risk-manager"}:
+            kinds.discard("price_history")  # Host indicators and frozen quotes remain; history stays in the audit/view.
         records = [record for record in self.catalog["records"] if record["kind"] in kinds]
         payload = {"date": context["date"], "symbols": context["symbols"], "input": input,
             "evidence": [{"evidence_id": record["evidence_id"], "kind": record["kind"],
@@ -259,7 +295,7 @@ class SubscriptionRoles:
         if context.get("timing"):
             compact = context.get("execution_policy") == "autonomous-paper-execution-v1"
             if compact:
-                payload["input_scope"] = "每家公司仅展示最新业务原文前400字、最新财务完整选段及单位、1条公司新闻；其他原件和新闻留本机。仅根据可见材料判断，旧期缺口单独披露；未展示不表示不存在风险。"
+                payload["input_scope"] = "展示业务与补证相关原文、最新财务及年报对照片段（有界截取并标注省略）、1条公司新闻。价格仅使用宿主技术指标与冻结报价，完整历史留本机。仅根据可见材料判断；披露缺失与未来经营不确定性分开，辅助缺口不一概否决。"
             # Full frozen catalog remains in the audit. These IDs bind the compact role presentation.
             for record in payload["evidence"]:
                 if compact:
@@ -283,9 +319,25 @@ class SubscriptionRoles:
             if name == "investment-manager":
                 analyst_input = json.loads(input)
                 payload["input"] = {role: json.loads(text)["claims"] for role, text in analyst_input.items()}
+                if compact:
+                    payload["research_tasks"] = [_pick(row, ("symbol", "category", "reason", "what_to_fetch", "review_by", "status"))
+                                                   for row in payload["research_tasks"]]
             if name == "risk-manager":
                 payload["input"] = json.loads(input)
+                if compact:
+                    payload["input"] = {key: deepcopy(value) for key, value in payload["input"].items()
+                                        if key in {"summary", "decisions", "proposed_decisions", "investment_cases", "investment_policy"}}
+                    payload["input_scope"] += " 风控保留全部逐股交易计划和投资论证；方向预测及分析师复述不重复传入，也不作为交易批准。"
             payload["timing"] = _pick(context["timing"], ("price_as_of_date", "information_cutoff_at", "execution_session", "approval_deadline", "max_price_deviation_pct"))
+            if compact:
+                for record in payload["evidence"]:
+                    if record["kind"] == "company_document":
+                        # Host audit keeps the full catalog. Spend presentation
+                        # space on source passages rather than repeated flags.
+                        record["data"] = {key: deepcopy(value) for key, value in record["data"].items()
+                                          if key in {"symbol", "categories", "published_at", "locator", "excerpt", "unit_context_present", "document_type", "excerpt_truncated"}}
+                        for key in ("source_tier", "content_scope", "data_quality"):
+                            record.pop(key, None)
         prompt = self.manager_prompt if name == "investment-manager" else self.definitions[name].prompt
         if context.get("timing") and name != "investment-manager":
             prompt = AFTER_CLOSE_ROLE_PROMPTS[name]
