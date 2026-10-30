@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from agent.model_access import resolve_model_access
 from agent.subscription import (SubscriptionClient, _run_codex, check_subscription_login,
-    parse_codex_events, protocol_progress, subscription_environment, subscription_workspace)
+    parse_codex_events, protocol_progress, stderr_progress, subscription_environment, subscription_workspace)
 from agent.subscription_roles import export_paper_context
 
 
@@ -23,6 +23,20 @@ def events(result=None, usage=None):
 
 
 class SubscriptionTests(unittest.TestCase):
+    def test_cli_errors_and_actual_tools_are_still_rejected(self):
+        for kind in ('warning', 'error', 'command_execution', 'mcp_tool_call', 'file_change', 'unrecognized_tool'):
+            activity = json.dumps({'type': 'item.completed', 'item': {'type': kind}})
+            with self.assertRaises(RuntimeError):
+                parse_codex_events(activity + '\n' + events())
+
+    def test_stderr_diagnostics_only_export_fixed_categories(self):
+        with subscription_workspace() as root:
+            path = root / 'stderr.txt'
+            path.write_text('otel exporter timeout private-account-field sqlite database locked', encoding='utf-8')
+            result = stderr_progress(path)
+            self.assertEqual(set(result['categories']), {'timeout', 'local_state', 'telemetry'})
+            self.assertNotIn('private-account-field', json.dumps(result))
+
     def test_default_subscription_and_explicit_api(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(resolve_model_access(), "subscription")
@@ -147,6 +161,25 @@ class SubscriptionTests(unittest.TestCase):
 
 
 class SubscriptionAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejected_response_preserves_known_terminal_usage_and_budget(self):
+        client = SubscriptionClient('fixture')
+        client._login = {'binary': 'fixture'}
+        client.settings['token_limit'] = 25
+        def rejected(args, prompt, root, timeout, cancelled):
+            (root / 'transport.json').write_text(json.dumps({'phase': 'turn.completed', 'terminal_usage': {
+                'input_tokens': 20, 'output_tokens': 5, 'cached_input_tokens': 0, 'reasoning_output_tokens': None}}), encoding='utf-8')
+            raise RuntimeError('rejected protocol item')
+        with patch('agent.subscription._run_codex', side_effect=rejected) as transport:
+            with self.assertRaises(RuntimeError):
+                await client.complete('fixture', {}, role='test')
+            self.assertEqual(client.report()['total_tokens'], 25)
+            self.assertTrue(client.report()['usage_complete'])
+            self.assertEqual(client.report()['validated_calls'], 0)
+            self.assertEqual(client.report()['rejected_calls'], 1)
+            with self.assertRaisesRegex(RuntimeError, '预算'):
+                await client.complete('fixture', {}, role='test')
+            self.assertEqual(transport.call_count, 1)
+
     async def test_timeout_diagnostic_survives_workspace_cleanup_without_claiming_usage(self):
         client = SubscriptionClient("fixture")
         client._login = {"binary": "fixture"}
@@ -235,6 +268,8 @@ class SubscriptionAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await client.complete("test", {}, role="test"), {"ok": True})
             self.assertNotIn("model_providers.openai", " ".join(run.call_args.args[0]))
             self.assertIn('forced_login_method="chatgpt"', run.call_args.args[0])
+            self.assertIn('model_verbosity="low"', run.call_args.args[0])
+            self.assertNotIn('features.skip_host_skill_discovery=true', run.call_args.args[0])
             client.settings["token_limit"] = 25
             with self.assertRaisesRegex(RuntimeError, "预算"):
                 await client.complete("test", {}, role="test")

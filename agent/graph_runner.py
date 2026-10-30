@@ -180,7 +180,8 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         from agent.subscription import subscription_settings
         subscription_config = subscription_settings()
         settings = None
-        setting_identity = {"effort": subscription_config["reasoning_effort"],
+        setting_identity = {"effort": subscription_config["reasoning_effort"], "verbosity": subscription_config["verbosity"],
+                            "isolation_profile": subscription_config["isolation_profile"],
                             "max_output_tokens": None, "input_char_limit": subscription_config["input_char_limit"]}
     else:
         settings = model_settings()

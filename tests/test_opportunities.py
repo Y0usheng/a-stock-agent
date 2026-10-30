@@ -3,10 +3,11 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import unittest
+from jsonschema import ValidationError
 from unittest.mock import patch
 
 from agent.opportunities import (OpportunityBook, compact_context, discover, normalize_event,
-                                 refresh_feed, route_feed, validate_review)
+                                 refresh_feed, route_feed, validate_review, normalize_wire_review, wire_review_schema)
 from agent.subscription import subscription_workspace
 from evals.experiments import canonical_hash
 
@@ -40,13 +41,62 @@ class FakeClient:
 
     async def complete(self, prompt, schema, *, role):
         self.calls += 1
-        return deepcopy(self.result)
+        packet = json.loads(prompt.splitlines()[-1])
+        wire = {}
+        for row in self.result['themes']:
+            lead = next(x for x in packet['themes'] if x['theme_id'] == row['theme_id'])
+            item = {'judgment': {k: deepcopy(v) for k, v in row.items() if k not in {'theme_id', 'supporting_event_ids', 'contradicting_event_ids', 'source_observations', 'beneficiary_symbols'}},
+                    'beneficiary_symbols': deepcopy(row['beneficiary_symbols'])}
+            quotes = {x['event_id']: x['quote'] for x in row['source_observations']}
+            item['evidence'] = {x['ref']: {'stance': 'support' if x['event_id'] in row['supporting_event_ids'] else 'contradict' if x['event_id'] in row['contradicting_event_ids'] else 'unused',
+                'quote': quotes.get(x['event_id'], '')} for x in lead['events']}
+            wire[row['theme_id']] = item
+        return wire
 
     def report(self):
         return {"requests_started": self.calls, "total_tokens": 10 * self.calls}
 
 
 class OpportunityTests(unittest.TestCase):
+    def test_valid_risk_theme_routes_to_exposure_checks_without_claiming_beneficiaries(self):
+        leads, _ = route_feed(feed())
+        response = judgment(leads, assessment='risk')
+        response['themes'][0]['beneficiary_symbols'] = []
+        result = self.run_discovery(feed(), client=FakeClient(response), limit=2)
+        self.assertEqual(result['selected_symbols'], [])
+        self.assertEqual(result['risk_review_symbols'], ['601138', '300308'])
+        self.assertEqual(result['active_symbols'], ['601138', '300308'])
+        self.assertEqual(result['selection_mode'], 'risk_exposure_review')
+        self.assertEqual(result['orders_submitted'], 0)
+        self.assertEqual(result['themes'][0]['judgment']['beneficiary_symbols'], [])
+        self.assertEqual(next(r for r in result['candidates'] if r['symbol']=='601138')['status'], 'selected_for_risk_review')
+
+    def test_wire_binding_preserves_exact_source_and_cannot_cite_other_topics(self):
+        source = feed([event(), event(title='创新药临床试验结果', excerpt='测试公开片段：创新药临床试验效果需要核查原始披露和现金流。', suffix='2')])
+        leads, _ = route_feed(source)
+        client = FakeClient(judgment(leads))
+        packet = {'themes': [{**lead, 'events': [{**e, 'ref': f'E{i+1}'} for i, e in enumerate(lead['events'])]} for lead in leads]}
+        wire = asyncio.run(client.complete(json.dumps(packet, ensure_ascii=False), wire_review_schema(leads), role='fixture'))
+        review = normalize_wire_review(wire, leads)
+        self.assertEqual(review, judgment(leads))
+        self.assertEqual(review['themes'][1]['source_observations'][0]['source_kind'], leads[1]['events'][0]['source_kind'])
+        bad = deepcopy(wire); bad[leads[0]['theme_id']]['evidence']['E9'] = {'stance': 'support', 'quote': 'invented'}
+        with self.assertRaises(ValidationError):
+            normalize_wire_review(bad, leads)
+        bad = deepcopy(wire); bad[leads[0]['theme_id']]['evidence']['E1']['quote'] = '这是原文没有提供的一句足够长的文本'
+        with self.assertRaises(ValueError):
+            normalize_wire_review(bad, leads)
+
+    def test_compact_review_keeps_complete_theme_and_evidence_checks(self):
+        leads, _ = route_feed(feed())
+        validate_review(judgment(leads), leads)
+        bad = judgment(leads); bad['themes'][0]['mechanism'] = '长' * 97
+        with self.assertRaises(ValidationError):
+            validate_review(bad, leads)
+        bad = judgment(leads); bad['themes'] = []
+        with self.assertRaises(ValidationError):
+            validate_review(bad, leads)
+
     def run_discovery(self, source, **kwargs):
         with subscription_workspace() as root:
             return asyncio.run(discover(source, book=OpportunityBook(root / "opportunities.db"), **kwargs))

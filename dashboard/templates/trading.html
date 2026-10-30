@@ -40,8 +40,8 @@ const set=(id,value)=>$(id).textContent=value, tone=v=>v<0?'negative':'positive'
 function drawOpportunities(){
  const o=data.opportunities;if(!o||o.status!=='ready'){set('opportunities',o?.message||'尚未运行行业机会发现。');if(o?.status==='review_failed')set('opportunityState','评审失败 · 未形成新判断');return;}
  const labels={research_priority:'优先研究',monitor:'继续观察',risk:'风险线索',reject:'不进入长期研究'};
- const states={held:'保留持仓',selected_for_research:'入选研究',retained_research:'延续研究',deferred_budget:'本轮名额外',not_selected:'未入选'};
- set('opportunityState',`截至 ${o.as_of_date} · ${o.selected_symbols.length} 个新研究候选`);
+ const states={held:'保留持仓',selected_for_research:'入选研究',selected_for_risk_review:'行业风险 · 待核实公司暴露',retained_research:'延续研究',deferred_budget:'预算延后',not_selected:'未入选'};
+ set('opportunityState',`截至 ${o.as_of_date} · ${o.selected_symbols.length} 个优先研究候选 · ${(o.candidates||[]).filter(c=>c.status==='selected_for_risk_review').length} 个风险核验对象`);
  const receipt=o.refresh_receipt||o.latest_fetch;
  $('opportunities').innerHTML=`<p class="muted">公开快讯与受控导入资料仅部分覆盖市场；模型提出的受益关系仍待公司资料核验。每轮新增研究最多 ${o.new_candidate_limit} 家。</p>`+
  (receipt?`<p class="muted">最近采集：${esc(receipt.observed_at||'本轮')} · ${esc(receipt.status)} · 接收 ${receipt.accepted??0} 条；采集时间晚于截止的新闻留待后续研究。</p>`:'')+
