@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from agent.model_access import resolve_model_access
 from agent.subscription import (SubscriptionClient, _run_codex, check_subscription_login,
-    parse_codex_events, protocol_progress, stderr_progress, subscription_environment, subscription_workspace)
+    parse_codex_events, protocol_progress, recovery_notice, error_diagnostic, stderr_progress, subscription_environment, subscription_workspace)
 from agent.subscription_roles import export_paper_context
 
 
@@ -23,6 +23,19 @@ def events(result=None, usage=None):
 
 
 class SubscriptionTests(unittest.TestCase):
+    def test_rejected_error_diagnostic_explains_shape_without_exporting_private_text(self):
+        value = {'type':'error','message':'Reconnecting\u2026 1/5 PRIVATE-CANARY https://private.invalid/account-123', 'willRetry':True}
+        result = error_diagnostic(value)
+        self.assertEqual(result['reason'], 'counter_prefix_mismatch')
+        self.assertTrue(result['unicode_ellipsis'])
+        self.assertTrue(result['retry_flag'])
+        self.assertNotIn('PRIVATE-CANARY', json.dumps(result))
+        self.assertNotIn('private.invalid', json.dumps(result))
+        self.assertFalse(recovery_notice(value))
+        bounded = error_diagnostic({'type':'error','message':'Reconnecting... 123456789/123456789'})
+        self.assertEqual(bounded['counter'], ['out_of_bounds','out_of_bounds'])
+        self.assertNotIn('123456789', json.dumps(bounded))
+
     def test_recovered_connection_notice_requires_valid_terminal_and_rejects_auth_or_quota(self):
         def notice(text):
             return json.dumps({'type':'error', 'message':text})+'\n'
@@ -159,7 +172,8 @@ class SubscriptionTests(unittest.TestCase):
                        {"type": "PRIVATE-CANARY"}, {"type": ["PRIVATE-CANARY"]}]
             path.write_text("\n".join(json.dumps(row) for row in entries), encoding="utf-8")
             result = protocol_progress(path)
-        self.assertEqual(result, {"phase": "error", "event_counts": {"thread.started": 1, "error": 1}})
+        self.assertEqual({k:result[k] for k in ('phase','event_counts')}, {"phase": "error", "event_counts": {"thread.started": 1, "error": 1}})
+        self.assertEqual(result['error_diagnostics'][0]['reason'], 'counter_prefix_mismatch')
         self.assertNotIn("PRIVATE-CANARY", json.dumps(result))
 
     def test_paper_export_filters_free_text_and_preserves_recent_predictions(self):
