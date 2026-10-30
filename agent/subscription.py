@@ -121,6 +121,32 @@ def recovery_notice(event):
             (bool(re.fullmatch(r"reconnecting\.{3}\s*\d+\s*/\s*\d+\s*", text)) or "stream disconnected" in text))
 
 
+def error_diagnostic(event):
+    """Allowlisted event structure/words; no arbitrary error messages, IDs or URLs."""
+    message = event.get("message")
+    if not isinstance(message, str):
+        nested = event.get("error")
+        message = nested.get("message", "") if isinstance(nested, dict) else ""
+    if not isinstance(message, str):
+        message = ""
+    text = message.lower()
+    prefix = re.match(r"reconnecting\.{3}\s*(\d+)\s*/\s*(\d+)\b", text)
+    details = json.dumps(event, ensure_ascii=False).lower()
+    blocked = [word for word in ("401", "403", "429", "unauthorized", "auth", "token", "quota", "rate limit", "usage limit", "permission", "policy", "approval") if word in details]
+    accepted = recovery_notice(event)
+    reason = ("accepted" if accepted else "non_error_event" if event.get("type") != "error" else
+              "counter_prefix_mismatch" if not prefix else
+              "counter_out_of_bounds" if not 1 <= int(prefix[1]) <= int(prefix[2]) <= 5 else
+              "blocked_error_class" if blocked else "unrecognized_message_suffix")
+    vocabulary = set("stream disconnected before completion transport error connection reset network timeout reconnecting retrying waiting for response completed ended closed request sending websocket failed attempt of after exhausted retry limit retries auth authentication unauthorized quota permission denied expired too many requests http status invalid token budget rate read decode body parse unexpected eof".split())
+    flag = event.get("willRetry", event.get("will_retry"))
+    return {"reason": reason, "message_chars": len(message), "unicode_ellipsis": "\u2026" in message,
+        "message_terms": [w for w in re.findall("[a-z]+", text) if w in vocabulary][:60],
+        "blocked_classes": blocked, "counter": [v if v in {"1", "2", "3", "4", "5"} else "out_of_bounds" for v in prefix.groups()] if prefix else None,
+        "keys_present": [key for key in ("message", "error", "willRetry", "will_retry", "retryable", "additional_details", "codex_error_info") if key in event],
+        "retry_flag": flag if type(flag) is bool else None}
+
+
 def protocol_progress(path):
     """Only event counters leave the temporary output; never IDs, messages or stderr."""
     kinds = {"thread.started", "turn.started", "turn.completed", "turn.failed", "item.started", "item.updated", "item.completed", "error"}
@@ -128,6 +154,7 @@ def protocol_progress(path):
     items = {}
     terminal_usage = None
     recoveries = 0
+    errors = []
     phase = "no_protocol_events_observed"
     try:
         with Path(path).open("rb") as stream:
@@ -139,6 +166,8 @@ def protocol_progress(path):
                 continue
             kind = event.get("type") if isinstance(event, dict) else None
             if isinstance(kind, str) and kind in kinds:
+                if kind in {"error", "turn.failed"} and len(errors) < 5:
+                    errors.append(error_diagnostic(event))
                 recoveries += int(recovery_notice(event))
                 counts[kind] = counts.get(kind, 0) + 1
                 phase = kind
@@ -158,6 +187,7 @@ def protocol_progress(path):
         phase = "diagnostic_unavailable"
     return {"phase": phase, "event_counts": counts, **({"item_type_counts": items} if items else {}),
             **({"recovery_notices": recoveries} if recoveries else {}),
+            **({"error_diagnostics": errors} if errors else {}),
             **({"terminal_usage": terminal_usage} if terminal_usage else {})}
 
 
