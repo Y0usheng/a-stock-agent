@@ -23,6 +23,22 @@ def events(result=None, usage=None):
 
 
 class SubscriptionTests(unittest.TestCase):
+    def test_recovered_connection_notice_requires_valid_terminal_and_rejects_auth_or_quota(self):
+        def notice(text):
+            return json.dumps({'type':'error', 'message':text})+'\n'
+        message = 'Reconnecting... 1/5 (stream disconnected before completion: connection reset)'
+        self.assertEqual(parse_codex_events(notice(message)+events())[0], {'ok':True})
+        self.assertEqual(parse_codex_events(notice('Reconnecting... 1/5')+events())[0], {'ok':True})
+        for suffix in (' HTTP 401', ' HTTP 403', ' HTTP 429', ' quota exceeded', ' authentication failed', ' permission denied'):
+            with self.assertRaises(RuntimeError):
+                parse_codex_events(notice(message+suffix)+events())
+        with self.assertRaises(RuntimeError):
+            parse_codex_events(notice(message))
+        with self.assertRaises(RuntimeError):
+            parse_codex_events(notice(message)*6+events())
+        with self.assertRaises(RuntimeError):
+            parse_codex_events(events()+'\n'+notice(message))
+
     def test_cli_errors_and_actual_tools_are_still_rejected(self):
         for kind in ('warning', 'error', 'command_execution', 'mcp_tool_call', 'file_change', 'unrecognized_tool'):
             activity = json.dumps({'type': 'item.completed', 'item': {'type': kind}})
