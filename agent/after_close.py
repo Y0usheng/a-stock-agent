@@ -1,5 +1,6 @@
 """New long-term daily path: captured information -> future confirmed paper orders."""
 import asyncio
+import os
 from dataclasses import asdict
 from copy import deepcopy
 
@@ -56,8 +57,9 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     else:
         book = OpportunityBook()
         prior = book.latest() or {}
-        feed = await asyncio.wait_for(host.call("market_discovery_feed", {"as_of_date": day, "after_close": True}), timeout=25)
-        discovery = await discover(feed, held=held, previous_symbols=prior.get("active_symbols", []), book=book, limit=2)
+        resume = os.environ.get("ASTOCK_RESUME_NEWS") or None
+        feed = {"as_of_date": day, "information_cutoff_at": preliminary["information_cutoff_at"]} if resume else await asyncio.wait_for(host.call("market_discovery_feed", {"as_of_date": day, "after_close": True}), timeout=25)
+        discovery = await discover(feed, held=held, previous_symbols=prior.get("active_symbols", []), book=book, limit=2, resume_snapshot=resume)
         active = discovery["active_symbols"]
     if not active:
         if discovery and discovery.get("review_error"):

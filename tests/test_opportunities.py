@@ -58,6 +58,22 @@ class FakeClient:
 
 
 class OpportunityTests(unittest.TestCase):
+    def test_resume_validated_frozen_review_spends_no_new_model_call(self):
+        with subscription_workspace() as root:
+            book = OpportunityBook(root / 'book.db')
+            leads, _ = route_feed(feed())
+            client = FakeClient(judgment(leads, 'risk'))
+            first = asyncio.run(discover(feed(), book=book, client=client, limit=2))
+            resumed = asyncio.run(discover({**feed(), 'information_cutoff_at': DAY+'T17:30:00+08:00'}, book=book,
+                client=client, limit=2, resume_snapshot=first['fingerprint']))
+            self.assertEqual(client.calls, 1)
+            self.assertEqual(resumed['active_symbols'], ['601138', '300308'])
+            self.assertEqual(resumed['usage']['total_tokens'], 0)
+            self.assertEqual(resumed['resumed_from'], first['fingerprint'])
+            self.assertEqual(resumed['themes'], first['themes'])
+            with self.assertRaises(ValueError):
+                asyncio.run(discover({**feed(), 'as_of_date':'2026-10-25'}, book=book, resume_snapshot=first['fingerprint']))
+
     def test_valid_risk_theme_routes_to_exposure_checks_without_claiming_beneficiaries(self):
         leads, _ = route_feed(feed())
         response = judgment(leads, assessment='risk')

@@ -337,19 +337,48 @@ def normalize_wire_review(wire, leads):
     return result
 
 
-async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None, use_model=True, limit=3):
+async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None, use_model=True, limit=3, resume_snapshot=None):
     """Freeze sources and a separately budgeted one-call judgment; never sends an order."""
     if not 1 <= limit <= 6:
         raise ValueError("研究新候选上限须为1至6")
     book = book or OpportunityBook()
-    leads, excluded = route_feed(feed)
+    resumed = None
+    if resume_snapshot:
+        rows = book._read("SELECT payload FROM snapshots WHERE id=?", (resume_snapshot,))
+        if len(rows) != 1 or not use_model:
+            raise ValueError("找不到可续跑的模型评审快照")
+        resumed = rows[0]
+        if (canonical_hash({k: v for k, v in resumed.items() if k != "fingerprint"}) != resume_snapshot
+                or resumed.get("review_error") or resumed["as_of_date"] != feed["as_of_date"]):
+            raise ValueError("续跑快照被改写、评审失败或行情日不同")
+        current_cutoff = event_time(feed.get("information_cutoff_at") or market_close(feed["as_of_date"], "cn").isoformat(), "cn")
+        prior_cutoff = event_time(resumed.get("information_cutoff_at") or resumed["cutoff"], "cn")
+        decided = event_time(resumed.get("discovery_decided_at") or resumed["cutoff"], "cn")
+        if max(prior_cutoff, decided) > current_cutoff:
+            raise ValueError("续跑不能采用未来的评审")
+        captured = {e["event_id"]: e for t in resumed["themes"] for e in t["events"]}
+        feed = {**resumed, "events": list(captured.values()), "information_cutoff_at": prior_cutoff.isoformat()}
+        routed, _ = route_feed(feed)
+        eligible = {e["event_id"] for t in routed for e in t["events"]}
+        if not set(captured) <= eligible:
+            raise ValueError("续跑原文的身份或可用时间未通过检查")
+        leads, excluded = deepcopy(resumed["themes"]), deepcopy(resumed["excluded_events"])
+        validate_review({"themes": [t["judgment"] for t in leads]}, leads)
+    else:
+        leads, excluded = route_feed(feed)
     # Latest-first round robin cap avoids spending unbounded context on the whole archive.
     leads.sort(key=lambda row: (-max(datetime.fromisoformat(x["published_at"]).timestamp() for x in row["events"]), row["theme_id"]))
     deferred_leads = leads[REVIEW_THEME_LIMIT:]
-    omitted = [row["theme_id"] for row in deferred_leads]
+    omitted = list(resumed["omitted_theme_ids"]) if resumed else [row["theme_id"] for row in deferred_leads]
+    if resumed:
+        deferred_leads = [{"theme_id": key, "possible_symbols": list(THEMES[key][2])} for key in omitted if key in THEMES]
     leads = leads[:REVIEW_THEME_LIMIT]
     review, usage, error, cached = None, {"requests_started": 0}, "", False
-    if use_model and leads:
+    if resumed:
+        review = {"themes": [t["judgment"] for t in leads]}
+        cached = True
+        usage = {"requests_started": 0, "completed_calls": 0, "total_tokens": 0, "usage_complete": True, "cache_hit": True}
+    if use_model and leads and not resumed:
         from agent.subscription import SubscriptionClient
         client = client or SubscriptionClient(DEFAULT_OPENAI_MODEL)
         client.settings.update(request_limit=1, token_limit=12000, input_char_limit=28000, request_timeout=75)
@@ -432,6 +461,9 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
     if feed.get("information_cutoff_at"):
         snapshot.update(information_cutoff_at=feed["information_cutoff_at"], cutoff=feed["information_cutoff_at"],
                         timing_policy="after_close_information_then_future_session_execution", discovery_decided_at=datetime.now(market_zone("cn")).isoformat())
+    if resumed:
+        snapshot.update(discovery_decided_at=resumed.get("discovery_decided_at"), resumed_from=resume_snapshot,
+            routing_resumed_at=datetime.now(market_zone("cn")).isoformat(), resume_source_usage=resumed["usage"])
     snapshot["fingerprint"] = canonical_hash(snapshot)
     book.save(snapshot)
     return snapshot
