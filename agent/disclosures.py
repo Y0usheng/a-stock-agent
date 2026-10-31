@@ -16,10 +16,11 @@ from config import DATA_DIR, MARKETS, ROOT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
-VERSION = "controlled-pdf-capture-v5"
+VERSION = "controlled-pdf-capture-v6"
+TEXT_PROTOCOL = "pymupdf-sorted-v1"
 HOME = DATA_DIR / "disclosures"
 MAX_PDF = 80_000_000
-UNITS = re.compile(r"(?<!编制)单位\s*[：:]\s*(?:人民币)?(?:百万元|千元|万元|亿元|元)[^\n]{0,25}|营业收入\s*[（(](?:元|千元|万元|百万元)[）)]")
+UNITS = re.compile(r"(?<!编制)单位\s*[：:]\s*(?:人民币)?(?:百万元|千元|万元|亿元|元)[^\n]{0,25}|[（(]人民币(?:百万元|千元|万元|亿元|元)|营业收入\s*[（(](?:元|千元|万元|百万元)[）)]")
 TERMS = {
     "business": ("主要业务", "主营业务", "经营模式", "核心竞争力", "主要风险", "Business overview"),
     "financials": ("主要会计数据", "营业收入", "经营活动产生的现金流量净额", "资产总计", "负债合计", "合并现金流量表", "Revenue", "Cash flow"),
@@ -119,18 +120,23 @@ def download_pdf(url, session, deadline):
 
 
 def extract_pages(path):
-    from pypdf import PdfReader
-    reader = PdfReader(path, strict=False)
-    if reader.is_encrypted or not 1 <= len(reader.pages) <= 700:
-        raise ValueError("加密或页数超限，需人工处理")
+    import pymupdf
     pages = []
-    for index, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        text = "\n".join(line.strip() for line in text.splitlines())[:50000]
-        pages.append({"pdf_page": index + 1, "text": text, "text_hash": canonical_hash(text)})
+    with pymupdf.open(path) as reader:
+        if reader.is_encrypted or not 1 <= len(reader) <= 700:
+            raise ValueError("加密或页数超限，需人工处理")
+        for index, page in enumerate(reader):
+            text = page.get_text(sort=True)[:50000]
+            pages.append({"pdf_page": index + 1, "text": text, "text_hash": canonical_hash(text)})
     if sum(len(page["text"].strip()) for page in pages) < 500:
         raise ValueError("扫描件或文本不足，需OCR核验")
-    return {"pages": pages, "page_count": len(pages), "extractor": "pypdf", "semantic_verified": False}
+    whole = ''.join(p['text'] for p in pages)
+    cjk = len(re.findall(r'[\u4e00-\u9fff]', whole))
+    corrupt = len(re.findall(r'[\u0f00-\u109f\ue000-\uf8ff\ufffd]', whole))
+    if cjk < 100 or (corrupt > 100 and corrupt > cjk * .1):
+        raise ValueError("公告中文无法可靠解码，需替代来源或OCR核验")
+    return {"pages": pages, "page_count": len(pages), "extractor": TEXT_PROTOCOL,
+            "extractor_version": pymupdf.VersionBind, "semantic_verified": False}
 
 
 def select_passages(document, extracted, tasks=()):
@@ -153,7 +159,7 @@ def select_passages(document, extracted, tasks=()):
             # Prefer a compact page with several relevant labels, not isolated keyword density.
             score = len(hits) + (10 if category == "financials" and "主要会计数据" in text else 0)
             start = max(0, min(hits) - 220)
-            business_heading = re.search(r"(?:^|\n)[一二三四五六七八九十]+、\s*报告期内公司[^\n]{0,12}业务", text)
+            business_heading = re.search(r"(?:^|\n)\s*(?:[一二三四五六七八九十]+、|\d+(?:\.\d+){0,3}\s+)\s*(?:报告期内公司[^\n]{0,12}业务|主要业务|业务经营|核心竞争力|零售金融|公司金融)", text)
             if category == "business" and business_heading:
                 score += 100
                 start = business_heading.start()
@@ -236,12 +242,12 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
         try:
             metadata = root / (symbol + ".index.json")
             cached = json.loads(metadata.read_text(encoding="utf-8")) if metadata.exists() else None
-            if cached and cached.get("protocol") == VERSION and (now() - event_time(cached["fetched_at"], "cn")).total_seconds() < 86400:
-                documents = cached["documents"]
+            if cached and cached.get("protocol") == VERSION and cached.get('query_cutoff_date') == str(cutoff)[:10] and (now() - event_time(cached["fetched_at"], "cn")).total_seconds() < 86400:
+                documents = [d for d in cached["documents"] if event_time(d['published_at'], 'cn') <= event_time(cutoff, 'cn')]
             else:
                 documents = query_reports(symbol, cutoff, session)
                 from agent.analysis import write_log
-                write_log(metadata, {"protocol": VERSION, "fetched_at": now().isoformat(), "documents": documents})
+                write_log(metadata, {"protocol": VERSION, "query_cutoff_date": str(cutoff)[:10], "fetched_at": now().isoformat(), "documents": documents})
             if not documents:
                 raise ValueError("没有符合时点的年报或季报")
             for document in documents:
@@ -266,19 +272,26 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
                         capture = {**document, "pdf_sha256": digest, "first_downloaded_at": now().isoformat(), "byte_count": len(data)}
                         from agent.analysis import write_log
                         write_log(reference, capture)
-                    text_path = root / (digest + ".pages.json")
+                    text_path = root / (digest + '.' + TEXT_PROTOCOL + ".pages.json")
                     stage = "extract"
-                    if not text_path.exists() or not capture.get("pages_sha256"):
+                    extraction = capture.get('extractions', {}).get(TEXT_PROTOCOL)
+                    if not text_path.exists() or not extraction:
                         subprocess.run([sys.executable, str(ROOT / "scripts" / "collect_disclosures.py"), "--extract-worker", str(pdf_path), str(text_path)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=max(1, min(35, deadline-monotonic())))
-                        capture["pages_sha256"] = hashlib.sha256(text_path.read_bytes()).hexdigest()
+                        capture.setdefault('extractions', {})[TEXT_PROTOCOL] = {'sha256': hashlib.sha256(text_path.read_bytes()).hexdigest()}
                         from agent.analysis import write_log
                         write_log(reference, capture)
-                    if hashlib.sha256(text_path.read_bytes()).hexdigest() != capture["pages_sha256"]:
+                    if hashlib.sha256(text_path.read_bytes()).hexdigest() != capture['extractions'][TEXT_PROTOCOL]['sha256']:
                         raise ValueError("PDF提取文本缓存已被改写")
                     extracted = json.loads(text_path.read_text(encoding="utf-8"))
                     stage = "select_passages"
                     passages = select_passages(document, extracted, tasks)
+                    from agent.financial_inputs import make_material
+                    financial = make_material(document, extracted)
+                    if financial:
+                        passages.append({**financial, 'capture_protocol': VERSION})
+                    if not passages:
+                        raise ValueError('没有可用业务或财务选段，不能把下载成功记作研究资料齐备')
                     identifiers = [book.add_material({**passage, "pdf_sha256": digest, "first_downloaded_at": capture["first_downloaded_at"]})["material_id"] for passage in passages]
                     receipt["documents"].append({**document, "pdf_sha256": digest, "page_count": extracted["page_count"], "material_ids": identifiers,
                                                  "captured_categories": sorted({category for p in passages for category in p["categories"]}),

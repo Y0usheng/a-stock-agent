@@ -9,3 +9,4 @@ langgraph-checkpoint-sqlite>=3.0,<4.0
 jsonschema>=4.23,<5.0
 requests>=2.31,<3.0
 pypdf>=5,<7
+PyMuPDF>=1.26,<2

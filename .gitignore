@@ -44,3 +44,4 @@ logs/demo/research-*.md
 .vscode/
 .DS_Store
 Thumbs.db
+tmp/pdfs/
