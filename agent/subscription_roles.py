@@ -78,6 +78,7 @@ def current_materials(rows):
         if category == "financials":
             usable = [row for row in candidates if row.get("unit_context_present") is not False]
             candidates = usable or candidates
+            candidates.sort(key=lambda row: (str(row.get('published_at') or ''), bool(row.get('numeric_facts'))), reverse=True)
         if candidates and candidates[0] not in selected:
             selected.append(candidates[0])
         if category == "business":
@@ -93,6 +94,9 @@ def current_materials(rows):
 
 def material_excerpt(row, limit):
     """Select a contiguous source window, never a generated business summary."""
+    if row.get('numeric_facts'):
+        from agent.financial_inputs import render_facts
+        return render_facts(row['numeric_facts'], limit)
     text = row.get("excerpt", "")
     if len(text) <= limit:
         return text
@@ -164,11 +168,18 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
                 text_limit = (650 if row["categories"] == ["business"] else 950) if compact else 1400 if context.get("timing") else 1200
                 if compact and len(chosen) > 2:
                     text_limit = (200 if row["categories"] == ["business"] else 450)
+                    if row['categories'] == ['business'] and any(r.get('numeric_facts') for r in chosen):
+                        text_limit = 650 // sum(r['categories']==['business'] for r in chosen)
                 item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
                 item["excerpt"] = material_excerpt(row, text_limit)
+                if row.get('numeric_facts'):
+                    from agent.financial_inputs import fact_line
+                    item['numeric_facts'] = [deepcopy(f) for f in row['numeric_facts']
+                        if fact_line(f) in item['excerpt']]
+                    item['financial_protocol'] = row['financial_protocol']
                 if compact and row.get("categories") == ["financials"]:
                     from agent.disclosures import financial_unit_visible
-                    item["unit_context_present"] = financial_unit_visible(item["excerpt"])
+                    item["unit_context_present"] = bool(item['numeric_facts']) if row.get('numeric_facts') else financial_unit_visible(item["excerpt"])
                 item["categories"] = [category for category in row["categories"] if category in {"business", "financials", "industry"}]
                 item["source_truth_verified"] = False
                 item["excerpt_truncated"] = len(row.get("excerpt", "")) > text_limit
@@ -217,7 +228,7 @@ def subscription_manifest(manifest: dict) -> dict:
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
-            "company_projection": "task-directed-business-and-annual-interim-originals-v3", "output_text_limit": 160, "manager_history_samples": 5,
+            "company_projection": "source-table-financial-rows-v4", "financial_protocol": "source-financial-rows-v1", "output_text_limit": 160, "manager_history_samples": 5,
             "company_news_per_symbol": 1, "empty_learning": "counts_only"})
     return value
 
@@ -285,6 +296,22 @@ class SubscriptionRoles:
         if self.long_term:
             payload.update(previous_cases=context["previous_cases"], research_tasks=context["research_tasks"],
                            auxiliary_gaps=context["auxiliary_gaps"], investment_policy=context["investment_policy"])
+            from agent.financial_inputs import references
+            eligible_materials = [record['payload'] for record in self.catalog['records']
+                                  if record['kind']=='company_document' and record['eligible']]
+            ref_by_material = {record['payload'].get('material_id'):record['evidence_id'] for record in self.catalog['records']
+                               if record['kind']=='company_document' and record['eligible']}
+            calculations = references(eligible_materials, context['snapshot'])
+            if calculations and name in {'investment-manager','risk-manager'}:
+                for group in calculations:
+                    for item in group['items']:
+                        item['evidence_id'] = ref_by_material[item.pop('material_id')]
+                        item.pop('fact_id',None)
+                        item.pop('price',None)  # The same frozen quote is already in market evidence.
+                payload['valuation_reference'] = calculations
+                payload['valuation_boundary'] = '宿主仅复算已披露每股数据对应的历史PE/PB，不是预测或目标价。不可将季报或半年EPS直接年化。情景倍数和未来盈利须明确论证，低倍数不自动触发买入；未做人工视觉核验本身不等于业务缺口，需指出具体无法核对的表头、单位或数值。'
+                if name == 'investment-manager':
+                    payload['valuation_boundary'] += '未来ROE、信用成本、商品价格及估值倍数属于需论证的情景假设，不是能从公告取得的未来事实。依据现有经营和风险数据给出有条件区间；不能仅因未来无法证实而无限列为待补证。具体关键事实缺失仍须保留核心缺口，不得为交易编造假设。'
             payload["opportunity_context"] = context["opportunity_context"]
             payload["opportunity_boundary"] = "主题仅为前序模型提出的待核验假设；不可作为公司事实或证据ID引用，不能替代公司披露、估值、反证及建仓条件。无新新闻不等于论证失效。"
             if context.get("timing"):
