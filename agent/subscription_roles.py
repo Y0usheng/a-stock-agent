@@ -89,6 +89,10 @@ def current_materials(rows):
             annual = next((row for row in candidates if row.get("document_type") == "annual"), None)
             if annual and annual not in selected:
                 selected.append(annual)
+    from agent.research_tasks import task_materials
+    for row in task_materials(rows):
+        if row not in selected:
+            selected.append(row)
     return selected
 
 
@@ -170,6 +174,8 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
                     text_limit = (200 if row["categories"] == ["business"] else 450)
                     if row['categories'] == ['business'] and any(r.get('numeric_facts') for r in chosen):
                         text_limit = 650 // sum(r['categories']==['business'] for r in chosen)
+                    if any(r.get('numeric_facts') for r in chosen) and any(r.get('task_ids') for r in chosen) and not row.get('numeric_facts'):
+                        text_limit = 650 // max(1, sum(not r.get('numeric_facts') for r in chosen))
                 item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
                 item["excerpt"] = material_excerpt(row, text_limit)
                 if row.get('numeric_facts'):
@@ -228,7 +234,7 @@ def subscription_manifest(manifest: dict) -> dict:
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
-            "company_projection": "source-table-financial-rows-v5", "financial_protocol": "source-financial-rows-v2", "output_text_limit": 160, "manager_history_samples": 5,
+            "company_projection": "source-table-financial-rows-v6", "financial_protocol": "source-financial-rows-v2", "tasks": "question-tasks-v1", "output_text_limit": 160, "manager_history_samples": 5,
             "company_news_per_symbol": 1, "empty_learning": "counts_only"})
     return value
 
@@ -347,8 +353,10 @@ class SubscriptionRoles:
                 analyst_input = json.loads(input)
                 payload["input"] = {role: json.loads(text)["claims"] for role, text in analyst_input.items()}
                 if compact:
-                    payload["research_tasks"] = [_pick(row, ("symbol", "category", "reason", "what_to_fetch", "review_by", "status"))
-                                                   for row in payload["research_tasks"]]
+                    tasks = payload['research_tasks']
+                    chosen_tasks = [row for symbol in context['symbols'] for row in [t for t in tasks if t['symbol']==symbol][:4]]
+                    payload["research_tasks"] = [_pick(row, ("task_id", "symbol", "category", "what_to_fetch", "review_by", "status", "capture_status")) for row in chosen_tasks]
+                    payload['research_tasks_omitted'] = len(tasks)-len(chosen_tasks)
             if name == "risk-manager":
                 payload["input"] = json.loads(input)
                 if compact:
