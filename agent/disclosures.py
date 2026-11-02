@@ -16,7 +16,7 @@ from config import DATA_DIR, MARKETS, ROOT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
-VERSION = "controlled-pdf-capture-v6"
+VERSION = "controlled-pdf-capture-v7"
 TEXT_PROTOCOL = "pymupdf-sorted-v1"
 HOME = DATA_DIR / "disclosures"
 MAX_PDF = 80_000_000

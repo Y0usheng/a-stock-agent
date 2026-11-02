@@ -97,6 +97,50 @@ class FinancialInputTests(unittest.TestCase):
         self.assertEqual({f['metric'] for f in facts},{'net_interest_margin','provision_coverage','credit_cost'})
         self.assertTrue(all('2026年1-6月' in fact_line(f) for f in facts))
 
+    def test_mixed_quarter_and_ytd_headers_do_not_reuse_preceding_cashflow_period(self):
+        from agent.financial_inputs import fact_line
+        text = ('600036 2026年第三季度报告\n主要会计数据及财务指标\n'
+                '（人民币百万元，特别注明除外）  2026年1-9月  2025年1-9月  同比增减(%)\n'
+                '经营活动产生的现金流量净额    146,188    176,134    -17.00\n'
+                '报告期    2026年7-9月    2026年1-9月\n'
+                '                         2026年    比上年同期    2026年    比上年同期\n'
+                '（人民币百万元，特别注明除外）    7-9月    增减(%)    1-9月    增减(%)\n'
+                '营业收入    86,671    6.41    264,852    5.34\n'
+                '基本每股收益（人民币元）    1.59    3.25    4.57    3.16\n')
+        facts = {f['metric']:f for f in extract_facts({**DOC,'document_type':'interim'},pages(text))}
+        self.assertEqual(facts['operating_cashflow']['column_period'],'2026年1-9月')
+        self.assertEqual(facts['eps']['value'],'1.59')
+        for name in ('eps','revenue'):
+            self.assertEqual(facts[name]['column_period'],'2026年7-9月')
+            self.assertIn('2026年7-9月',fact_line(facts[name]))
+            self.assertNotIn('2026年1-9月',fact_line(facts[name]))
+
+    def test_repeated_bare_year_without_period_is_ambiguous(self):
+        text = ('600036 2026年第三季度报告\n主要会计数据\n单位：百万元\n'
+                '2026年1-9月  2025年1-9月\n经营活动产生的现金流量净额    146    176\n'
+                '2026年  同比(%)  2026年  同比(%)\n营业收入    86    6    264    5\n')
+        self.assertEqual([f['metric'] for f in extract_facts(DOC,pages(text))],['operating_cashflow'])
+
+    def test_note_number_is_not_a_balance_and_source_row_stays_intact(self):
+        text = ('600519 2025年度报告\n合并资产负债表\n单位：元\n'
+                '项目  附注  2025年12月31日  2024年12月31日\n'
+                '货币资金    1    51,690,610,946.50    59,295,822,956.89\n')
+        source = pages(text)
+        facts = extract_facts({**DOC,'symbol':'600519'},source)
+        self.assertEqual(len(facts),1)
+        self.assertEqual(facts[0]['value'],'51690610946.50')
+        self.assertEqual(facts[0]['value_token_index'],1)
+        self.assertEqual(facts[0]['column_period'],'2025年12月31日')
+        self.assertEqual(text[facts[0]['start']:facts[0]['end']],facts[0]['source_line'])
+
+    def test_note_table_with_missing_value_or_note_cell_is_not_guessed(self):
+        header = '600519 2025年度报告\n合并资产负债表\n单位：元\n项目  附注  2025年  2024年\n'
+        for row in ('货币资金    1    59,295,822,956.89\n',
+                    '货币资金    51,690,610,946.50    59,295,822,956.89\n',
+                    '货币资金    1    -    59,295,822,956.89\n'):
+            with self.subTest(row=row):
+                self.assertEqual(extract_facts(DOC,pages(header+row)),[])
+
     def test_new_extraction_keeps_legacy_text_cache_unchanged(self):
         import hashlib,json
         import pymupdf
