@@ -63,6 +63,8 @@ def sanitize_view(view):
     result = pick(view, "status market as_of_date fetched_at source price_basis fingerprint tracking_start analysis_date analysis_policy message warnings limitations execution_policy")
     if "learning" in view:
         result["learning"] = pick(view["learning"], "version status information_cutoff_at mature_samples pending_samples active_parameter_version strategy_status")
+    if 'research_quality' in view:
+        result['research_quality'] = [pick(row, 'detected_at reason symbols status') for row in view['research_quality']]
     if view.get("timing"):
         result["timing"] = pick(view["timing"], "version price_as_of_date information_cutoff_at decision_at execution_session execution_at approval_deadline order_type max_price_deviation_pct fill_model")
     if "pending_orders" in view:
@@ -83,7 +85,12 @@ def sanitize_view(view):
         item["prediction"] = pick(row["prediction"], "symbol direction horizon_days confidence calibrated_confidence calibration_version rationale") if row.get("prediction") else None
         item["investment_case"] = public_case(row.get("investment_case"))
         result["stocks"].append(item)
-    result["research_tasks"] = [pick(row, "symbol status what_to_fetch review_by") for row in view.get("research_tasks", [])]
+    result['research_tasks'] = []
+    for row in view.get('research_tasks', []):
+        task = pick(row, 'task_id symbol category status what_to_fetch review_by opened_at updated_at last_attempt_at attempt_count capture_status recorded_at resolution')
+        if 'evidence' in row:
+            task['evidence'] = [{**pick(e, 'locator published_at first_seen_at'), 'url': public_url(e.get('url'))} for e in row['evidence']]
+        result['research_tasks'].append(task)
     opportunity = view.get("opportunities", {})
     public = pick(opportunity, "status as_of_date message selected_symbols new_candidate_limit selection_mode limitations research_watchlist baseline_review_symbols deferred_research_symbols")
     public["candidates"] = [pick(row, "symbol name status reason theme_ids") for row in opportunity.get("candidates", [])]
@@ -161,7 +168,10 @@ def make_report(day, *, cache=PRICE_CACHE, ledger=None, logs=None, book=None):
             def _read(self, *args):
                 return snapshots
         view["opportunities"] = OpportunityBook.view(AsOfBook(), payload["histories"])
-    view["research_tasks"] = []  # Current task status is not a historical snapshot.
+    from agent.investment import ResearchBook
+    from agent.research_quality import QualityBook
+    view['research_tasks'] = ResearchBook().task_snapshot(cutoff.isoformat())
+    QualityBook().annotate(view, logs, cutoff.isoformat())
     if latest.get("timing"):
         from agent.order_queue import OrderQueue
         view["timing"] = latest["timing"]
@@ -207,9 +217,9 @@ def validate_report(report):
         if report[field] and date.fromisoformat(report[field]) > day:
             raise ValueError("报告含未来分析或价格")
     datetime.fromisoformat(report["published_at"])
-    numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence calibrated_confidence target_weight actual_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct mature_samples pending_samples".split())
+    numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence calibrated_confidence target_weight actual_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct mature_samples pending_samples attempt_count".split())
     containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing", "learning"}
-    string_arrays = {"warnings", "limitations", "selected_symbols", "risk_review_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols", "research_watchlist", "baseline_review_symbols", "deferred_research_symbols"}
+    string_arrays = {"warnings", "limitations", "selected_symbols", "risk_review_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols", "research_watchlist", "baseline_review_symbols", "deferred_research_symbols", "symbols"}
     def check(value, key="", depth=0):
         if depth > 12:
             raise ValueError("公开报告嵌套超限")

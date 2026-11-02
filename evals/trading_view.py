@@ -223,6 +223,8 @@ def load_view(cache=PRICE_CACHE, log_dir=LOG_DIR, db=None):
     if logs and logs[-1].get("learning"):
         from agent.learning import public_summary
         result["learning"] = public_summary(logs[-1]["learning"])
+    from agent.research_quality import QualityBook
+    QualityBook().annotate(result, logs)
     return result
 
 

@@ -16,7 +16,7 @@ from config import DATA_DIR, MARKETS, ROOT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
-VERSION = "controlled-pdf-capture-v7"
+VERSION = "controlled-pdf-capture-v8"
 TEXT_PROTOCOL = "pymupdf-sorted-v1"
 HOME = DATA_DIR / "disclosures"
 MAX_PDF = 80_000_000
@@ -215,6 +215,43 @@ def select_passages(document, extracted, tasks=()):
                 "extraction_status": "source_spans_units_checked_semantics_unverified",
                 "page_excerpt_complete": start == 0 and end == len(page["text"]), "report_period": None,
                 "task_matches": [term for term in requested if term in excerpt]})
+    selected.extend(select_task_passages(document, extracted, tasks))
+    return selected
+
+
+def select_task_passages(document, extracted, tasks):
+    from agent.research_tasks import PROTOCOL, FINAL, query_terms
+    selected = []
+    for rank, task in enumerate(tasks):
+        if task.get('task_protocol') != PROTOCOL or task['status'] in FINAL:
+            continue
+        terms = query_terms(task)
+        candidates = []
+        for page in extracted['pages']:
+            text = page['text']
+            if '目录' in text[:180]:
+                continue
+            hits = [term for term in terms if term in text]
+            if hits:
+                candidates.append((sum(min(len(term), 12) for term in hits), -page['pdf_page'], page, hits))
+        if not candidates:
+            continue
+        score, _, page, hits = max(candidates, key=lambda row: row[:2])
+        text = page['text']
+        best = max(hits, key=len)
+        start = max(0, text.find(best)-180)
+        start = text.rfind('\n', 0, start)+1
+        end = min(len(text), start+800)
+        category = 'business' if task['category'] in {'business', 'industry'} else 'financials'
+        excerpt = text[start:end]
+        selected.append({**document, 'categories': [category], 'excerpt': excerpt,
+            'locator': f"PDF第{page['pdf_page']}页，任务相关候选原文（尚未验证回答充分性）",
+            'pdf_page': page['pdf_page'], 'page_text_hash': page['text_hash'],
+            'source_spans': [{'pdf_page': page['pdf_page'], 'start': start, 'end': end, 'page_text_hash': page['text_hash']}],
+            'task_ids': [task['task_id']], 'task_rank': rank, 'task_match_score': score, 'task_matches': [t for t in hits if t in excerpt],
+            'capture_protocol': VERSION, 'unit_context_present': financial_unit_visible(excerpt) if category == 'financials' else None,
+            'extraction_status': 'task_keyword_candidate_not_semantic_resolution', 'page_excerpt_complete': start == 0 and end == len(text),
+            'data_source': '巨潮官方PDF任务定向选段', 'data_quality': 'imported', 'source_truth_verified': False})
     return selected
 
 
@@ -231,12 +268,18 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0", "Referer": "https://www.cninfo.com.cn/"})
     receipt = {"protocol": VERSION, "requested_symbols": symbols, "documents": [], "errors": [], "model_requests": 0}
+    book.migrate_tasks()
     for symbol in symbols:
         if monotonic() >= deadline:
             receipt["errors"].append({"symbol": symbol, "reason": "total_budget_exhausted"})
             continue
         stage = "index"
-        tasks = [row for row in book.tasks() if row.get("symbol") == symbol]
+        tasks = [row for row in book.tasks() if row.get("symbol") == symbol and row.get('status') not in {'resolved','quarantined','migrated'}]
+        # Bounded source presentation rotates without increasing research calls.
+        if len(tasks) > 3:
+            shift = event_time(cutoff, 'cn').date().toordinal()*3 % len(tasks)
+            tasks = tasks[shift:] + tasks[:shift]
+        captured = []
         if not tasks:
             tasks = [{"category": category, "what_to_fetch": " ".join(terms)} for category, terms in TASK_TERMS.items()]
         try:
@@ -292,7 +335,9 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
                         passages.append({**financial, 'capture_protocol': VERSION})
                     if not passages:
                         raise ValueError('没有可用业务或财务选段，不能把下载成功记作研究资料齐备')
-                    identifiers = [book.add_material({**passage, "pdf_sha256": digest, "first_downloaded_at": capture["first_downloaded_at"]})["material_id"] for passage in passages]
+                    stored = [book.add_material({**passage, "pdf_sha256": digest, "first_downloaded_at": capture["first_downloaded_at"]}) for passage in passages]
+                    captured.extend(stored)
+                    identifiers = [row['material_id'] for row in stored]
                     receipt["documents"].append({**document, "pdf_sha256": digest, "page_count": extracted["page_count"], "material_ids": identifiers,
                                                  "captured_categories": sorted({category for p in passages for category in p["categories"]}),
                                                  "task_matches": sorted({term for p in passages for term in p.get("task_matches", [])})})
@@ -301,6 +346,7 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
                         "reason": type(exc).__name__ + ": controlled_source_capture_failed", "stage": stage})
         except Exception as exc:
             receipt["errors"].append({"symbol": symbol, "reason": type(exc).__name__ + ": controlled_source_capture_failed", "stage": stage})
+        book.record_capture(tasks, captured, cutoff=cutoff, had_error=any(e['symbol']==symbol for e in receipt['errors']))
     session.close()
     receipt["elapsed_seconds"] = round(budget_seconds - max(0, deadline-monotonic()), 3)
     from agent.analysis import write_log

@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 from config import DATA_DIR, MARKETS, MAX_POSITION_PCT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time, market_close
+from agent.research_quality import QualityBook
+from agent.research_tasks import TaskTracker
 
 VERSION = "long-term-investment-v1"
 PROMPT_VERSION = "manager-long-v3"
@@ -64,7 +66,8 @@ def select_materials(rows, limit=4):
             targeted = max(candidates, key=lambda item: len(item.get("task_matches", [])), default=None)
             if targeted and targeted.get("task_matches") and targeted not in selected:
                 selected.append(targeted)
-    for row in rows:
+    from agent.research_tasks import task_materials
+    for row in task_materials(rows) + rows:
         if row not in selected:
             selected.append(row)
     return selected[:limit]
@@ -188,9 +191,10 @@ def validate_cases(result, symbols, *, catalog=None, as_of=None, account=None, p
                     raise ValueError("建仓/估值等待缺少业务与财务原始披露证据")
 
 
-class ResearchBook:
-    def __init__(self, path=RESEARCH_DB):
+class ResearchBook(TaskTracker):
+    def __init__(self, path=RESEARCH_DB, *, quality=None):
         self.path = Path(path)
+        self.quality = quality or QualityBook()
 
     @contextmanager
     def db(self):
@@ -201,6 +205,7 @@ class ResearchBook:
             CREATE TABLE IF NOT EXISTS materials(id TEXT PRIMARY KEY,symbol TEXT,published_at TEXT,first_seen_at TEXT,expires_at TEXT,payload TEXT);
             CREATE TABLE IF NOT EXISTS cases(id TEXT PRIMARY KEY,symbol TEXT,day TEXT,variant TEXT,log_hash TEXT,payload TEXT,UNIQUE(symbol,day,variant));
             CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,symbol TEXT,category TEXT,opened_at TEXT,updated_at TEXT,status TEXT,payload TEXT);
+            CREATE TABLE IF NOT EXISTS task_events(id TEXT PRIMARY KEY,task_id TEXT,symbol TEXT,recorded_at TEXT,payload TEXT);
             """)
             yield conn
             conn.commit()
@@ -235,11 +240,15 @@ class ResearchBook:
 
     def snapshot(self, symbols, day, variant=None, information_cutoff_at=None):
         cutoff = event_time(information_cutoff_at, "cn") if information_cutoff_at else market_close(day, "cn")
+        excluded_logs = self.quality.blocked(cutoff=cutoff.isoformat())
+        excluded_materials = self.quality.blocked('material', cutoff.isoformat())
         materials, previous, tasks = [], [], []
         with self.db() as conn:
+            self._migrate_tasks(conn)
             for symbol in symbols:
                 rows = conn.execute("SELECT payload FROM materials WHERE symbol=? ORDER BY published_at DESC,id", (symbol,)).fetchall()
                 available = [json.loads(row[0]) for row in rows]
+                available = [row for row in available if row['material_id'] not in excluded_materials]
                 available = [row for row in available if event_time(row["published_at"], "cn") <= cutoff and row["expires_at"] >= day]
                 if information_cutoff_at:
                     available = [row for row in available if event_time(row["first_seen_at"], "cn") <= cutoff]
@@ -252,7 +261,7 @@ class ResearchBook:
                 if variant is not None:
                     query += " AND variant=?"
                     params.append(variant)
-                old = conn.execute(query + " ORDER BY day DESC,rowid DESC LIMIT 1", params).fetchone()
+                old = next((row for row in conn.execute(query + " ORDER BY day DESC,rowid DESC", params) if row['log_hash'] not in excluded_logs), None)
                 if old:
                     previous.append({"case": json.loads(old[0]), "as_of_date": old[1], "source_log_hash": old[2], "kind": "past_model_opinion_not_external_fact"})
                 categories = {category for row in available[:8] for category in row["categories"]}
@@ -270,17 +279,21 @@ class ResearchBook:
                         "review_by": due}
                     conn.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,status=excluded.status,payload=excluded.payload",
                         (task_id, symbol, category, day, day, status, json.dumps(task, ensure_ascii=False)))
+                    self._task_event(conn, {**task, 'opened_at': opened, 'updated_at': day})
                     tasks.append(task)
-                for old_task in conn.execute("SELECT payload,status FROM tasks WHERE symbol=? AND id LIKE 'gap_%' AND status!='resolved' AND updated_at<=?", (symbol, day)):
+                for old_task in conn.execute("SELECT payload,status FROM tasks WHERE symbol=? AND id LIKE 'gap_%' AND status NOT IN ('resolved','migrated') AND updated_at<=?", (symbol, day)):
                     task = json.loads(old_task[0])
                     task["status"] = "overdue" if day > task["review_by"] else old_task[1]
                     tasks.append(task)
+        tasks = [t for t in self._visible_tasks(tasks, cutoff.isoformat()) if t['status'] != 'quarantined']
         return {"policy": POLICY, "as_of_date": day, "materials": materials, "previous_cases": previous, "tasks": tasks,
                 "visibility_policy": "published_and_first_seen_by_information_cutoff; imports_not_independently_verified" if information_cutoff_at else "published_by_close; first_seen_retained; imports_not_independently_verified"}
 
     def save(self, log, variant):
         from agent.contracts import validate_decision_result
         from agent.evidence import validate_evidence_audit
+        if canonical_hash(log) in self.quality.blocked():
+            raise ValueError('已确认存在输入错误的记录不能重用于研究底稿')
         valid_mode = log.get("execution_mode") in {"shadow", "paper"}
         if log.get("execution_mode") == "pending" and log.get("timing", {}).get("version") == "after-close-next-session-v1":
             from agent.order_queue import OrderQueue
@@ -300,37 +313,30 @@ class ResearchBook:
                 if prior and prior[0] != canonical_hash(log):
                     raise ValueError("长期论证同版本同日只保留首次输出")
                 conn.execute("INSERT OR IGNORE INTO cases VALUES(?,?,?,?,?,?)", ("case_" + canonical_hash([row["symbol"], log["as_of_date"], variant])[:24], row["symbol"], log["as_of_date"], variant, canonical_hash(log), json.dumps(row, ensure_ascii=False)))
-                old_tasks = {item["id"]: dict(item) for item in conn.execute("SELECT * FROM tasks WHERE symbol=? AND id LIKE 'gap_%'", (row["symbol"],))}
-                conn.execute("UPDATE tasks SET status='resolved',updated_at=? WHERE symbol=? AND id LIKE 'gap_%'", (log["as_of_date"], row["symbol"]))
-                for gap in row["core_gaps"]:
-                    task_id = "gap_" + canonical_hash([row["symbol"], gap["category"]])[:24]
-                    payload = {**gap, "task_id": task_id, "symbol": row["symbol"], "status": "open",
-                        "review_by": row["next_review_date"], "source_case_hash": canonical_hash(row)}
-                    if task_id in old_tasks and old_tasks[task_id]["status"] != "resolved":
-                        payload["review_by"] = min(payload["review_by"], json.loads(old_tasks[task_id]["payload"])["review_by"])
-                    if log["as_of_date"] > payload["review_by"]:
-                        payload["status"] = "overdue"
-                    conn.execute("INSERT INTO tasks VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,status=excluded.status,payload=excluded.payload",
-                        (task_id, row["symbol"], gap["category"], log["as_of_date"], log["as_of_date"], payload["status"], json.dumps(payload, ensure_ascii=False)))
+                self._save_tasks(conn, log, row)
 
     def tasks(self):
         if not self.path.exists():
             return []
         with closing(sqlite3.connect(f"file:{self.path.resolve().as_posix()}?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
-            return [{**json.loads(row["payload"]), "opened_at": row["opened_at"], "updated_at": row["updated_at"], "status": row["status"]}
-                for row in conn.execute("SELECT * FROM tasks ORDER BY symbol,category,id")]
+            rows = [{**json.loads(row["payload"]), "opened_at": row["opened_at"], "updated_at": row["updated_at"], "status": row["status"]}
+                    for row in conn.execute("SELECT * FROM tasks ORDER BY symbol,category,id")]
+        return self._visible_tasks(rows)
 
     def review_order(self, symbols, day, logs=()):
         """Unreviewed companies first, then oldest review; no new model request."""
         last = {}
+        excluded = self.quality.blocked()
         if self.path.exists():
             with closing(sqlite3.connect(f"file:{self.path.resolve().as_posix()}?mode=ro", uri=True)) as conn:
-                last = dict(conn.execute("SELECT symbol,MAX(day) FROM cases WHERE day<=? GROUP BY symbol", (day,)))
+                for symbol, reviewed, log_hash in conn.execute('SELECT symbol,day,log_hash FROM cases WHERE day<=? ORDER BY day', (day,)):
+                    if log_hash not in excluded:
+                        last[symbol] = reviewed
         from evals.metrics import uses_synthetic_data
         for log in logs:
             stamp = (log.get("timing", {}).get("decision_at") or log.get("generated_at") or log.get("as_of_date") or log.get("date", ""))[:10]
-            if not stamp or stamp > day or uses_synthetic_data(log):
+            if not stamp or stamp > day or uses_synthetic_data(log) or canonical_hash(log) in excluded:
                 continue
             for row in log.get("decisions", []):
                 last[row["symbol"]] = max(last.get(row["symbol"], ""), stamp)

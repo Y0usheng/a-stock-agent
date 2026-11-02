@@ -23,12 +23,16 @@ def past_logs(cutoff, root=LOG_DIR, model="gpt-6.1-sol"):
     """Only host-validated formal logs; QA shadows and failed runs never train policy."""
     from agent.evidence import validate_evidence_audit
     from agent.contracts import validate_risk_approval
+    from agent.research_quality import QualityBook
+    excluded = QualityBook().blocked(cutoff=cutoff)
     rows = []
     for path in sorted((Path(root) / "after_close").glob("*.cn.json"))[-800:]:
         try:
             if path.stat().st_size > 5_000_000:
                 continue
             row = json.loads(path.read_text(encoding="utf-8"))
+            if canonical_hash(row) in excluded:
+                continue
             stamp = row.get("timing", {}).get("decision_at")
             if (row.get("market") != "cn" or row.get("execution_mode") != "paper" or uses_synthetic_data(row)
                     or not stamp or event_time(stamp, "cn") >= event_time(cutoff, "cn")

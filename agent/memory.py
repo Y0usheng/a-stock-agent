@@ -19,6 +19,9 @@ def _log_date(data: dict) -> str | None:
 
 
 def _load_past_logs(log_dir: Path, market: str, before_date: str, include_after_close=False, cutoff_at=None) -> list[dict]:
+    from agent.research_quality import QualityBook
+    from evals.experiments import canonical_hash
+    excluded = QualityBook().blocked(cutoff=cutoff_at) if include_after_close else set()
     logs = []
     paths = list(log_dir.glob(f"*.{market}.json"))
     if include_after_close:
@@ -29,6 +32,8 @@ def _load_past_logs(log_dir: Path, market: str, before_date: str, include_after_
         except (OSError, json.JSONDecodeError):
             continue
         log_date = _log_date(data)
+        if canonical_hash(data) in excluded:
+            continue
         eligible = bool(log_date and log_date < before_date)
         if include_after_close:
             from evals.metrics import uses_synthetic_data
