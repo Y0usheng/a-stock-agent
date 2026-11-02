@@ -12,6 +12,8 @@ from evals.experiments import canonical_hash
 from agent.evidence import (CLAIM_SCHEMA, EVIDENCE_VERSION, build_catalog, cited_schema,
                             validate_claims, validate_result_evidence, derived_link_schema, restore_link_status)
 from agent.investment import LONG_INSTRUCTIONS, is_long, result_schema, validate_cases, select_materials
+from agent.investment import RESEARCH_PROTOCOL
+from agent.reference_slots import reference_slots, rewrite_references, restore_visible_references, PROTOCOL as REFERENCE_PROTOCOL
 
 EVIDENCE_INSTRUCTIONS = (
     "宿主已提供本轮可用数据，不调用工具。缺失字段注明不足。分析摘要每只股票不超过两句；"
@@ -234,7 +236,7 @@ def subscription_manifest(manifest: dict) -> dict:
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
-            "company_projection": "source-table-financial-rows-v6", "financial_protocol": "source-financial-rows-v2", "tasks": "question-tasks-v1", "output_text_limit": 160, "manager_history_samples": 5,
+            "company_projection": "source-table-financial-rows-v7", "financial_protocol": "source-financial-rows-v2", "tasks": "question-tasks-v1", 'research_completion':RESEARCH_PROTOCOL, 'reference_slots':REFERENCE_PROTOCOL, "output_text_limit": 160, "manager_history_samples": 5,
             "company_news_per_symbol": 1, "empty_learning": "counts_only"})
     return value
 
@@ -247,6 +249,7 @@ class SubscriptionRoles:
         self.definitions = build_agent_definitions()
         self.manager_prompt = manager_prompt
         self.catalog = build_catalog(self.context, market, allow_synthetic=allow_synthetic)
+        self.slots = reference_slots(self.catalog) if self.context.get('execution_policy') == 'autonomous-paper-execution-v1' else {}
         self.claims_by_role = {}
         self.raw_outputs = {}
 
@@ -254,6 +257,7 @@ class SubscriptionRoles:
         return {"catalog": deepcopy(self.catalog), "analyst_claims": deepcopy(self.claims_by_role),
                 "validation": "id_content_scope_symbol_and_publication_cutoff",
                 "semantic_support_verified": False,
+                **({'wire_reference_protocol':REFERENCE_PROTOCOL, 'wire_reference_slots':{v:k for k,v in self.slots.items()}} if self.slots else {}),
                 **({"role_sources": {"technical-analyst": "host_quote_indicator_facts_v1", "fundamental-analyst": "subscription_model", "investment-manager": "subscription_model", "risk-manager": "independent_subscription_model"}} if self.context.get("timing") else {})}
 
     def technical_snapshot(self):
@@ -383,6 +387,13 @@ class SubscriptionRoles:
                 instructions += "你只输出本角色研究结论，不使用经理：、风控：等角色归属前缀，不宣称任何审批状态。"
         if context.get("timing"):
             instructions = AFTER_CLOSE_EVIDENCE_INSTRUCTIONS
+        if self.slots:
+            visible = {r['evidence_id'] for r in payload['evidence']}
+            payload = rewrite_references(payload, {ref:slot for ref,slot in self.slots.items() if ref in visible})
+            instructions += '证据使用本轮E1、E2等短编号，宿主还原身份后校验；不得编造或跨角色引用。'
+            if name == 'investment-manager':
+                # The native response schema is already supplied independently.
+                prompt = prompt.split('只返回JSON：',1)[0] + '\n只返回响应模式规定的JSON。'
         prompt += ("\n" + instructions + "\n" +
                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         schema = RESULT_EVIDENCE_SCHEMA if name == "investment-manager" else RISK_SCHEMA if name == "risk-manager" else SUMMARY_SCHEMA
@@ -396,6 +407,8 @@ class SubscriptionRoles:
                 schema = bounded_text_schema(schema)
         result = await self.client.complete(prompt, schema, role=name)
         self.raw_outputs[name] = deepcopy(result)
+        if self.slots:
+            result = restore_visible_references(result, self.slots, visible)
         if context.get("timing"):
             result = restore_link_status(result)
         if name in {"technical-analyst", "fundamental-analyst"}:
@@ -409,6 +422,8 @@ class SubscriptionRoles:
             return json.dumps(result, ensure_ascii=False)
         validate_result_evidence(result, self.catalog, context["symbols"], risk=name == "risk-manager")
         if self.long_term and name == "investment-manager":
+            if self.slots and result.get('research_protocol') != RESEARCH_PROTOCOL:
+                raise ValueError('经理未遵守本轮研究完成协议')
             validate_cases(result, set(context["symbols"]), catalog=self.catalog, as_of=context["date"],
                 account=context["paper_account"], prices={row["symbol"]: row["close"] for row in context["snapshot"]})
         return json.dumps(result, ensure_ascii=False)

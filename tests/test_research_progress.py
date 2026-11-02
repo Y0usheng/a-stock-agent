@@ -45,8 +45,8 @@ class ResearchProgressTests(unittest.TestCase):
     def test_multiple_financial_gaps_are_distinct_and_omission_does_not_resolve(self):
         _, log=example(False)
         log['investment_cases'][0]['core_gaps']=[
-            {'category':'financials','reason':'缺负债','what_to_fetch':'取得债务到期分布；取得受限资金披露。'},
-            {'category':'financials','reason':'缺资本承诺','what_to_fetch':'取得资本承诺项目。'}]
+            {'category':'financials','gap_type':'missing_disclosure','reason':'缺负债','what_to_fetch':'取得债务到期分布；取得受限资金披露。'},
+            {'category':'financials','gap_type':'missing_disclosure','reason':'缺资本承诺','what_to_fetch':'取得资本承诺项目。'}]
         with tempfile.TemporaryDirectory() as tmp:
             book=ResearchBook(Path(tmp)/'research.db');book.save(log,'v')
             tasks=book.tasks();self.assertEqual(len(tasks),3);self.assertEqual(len({t['task_id'] for t in tasks}),3)
@@ -85,7 +85,7 @@ class ResearchProgressTests(unittest.TestCase):
 
     def test_legacy_migration_recovers_same_category_gaps_from_immutable_case(self):
         _, log=example(False);case=log['investment_cases'][0]
-        case['core_gaps'].append({'category':'financials','reason':'另一缺口','what_to_fetch':'取得债务到期披露'})
+        case['core_gaps'].append({'category':'financials','gap_type':'missing_disclosure','reason':'另一缺口','what_to_fetch':'取得债务到期披露'})
         with tempfile.TemporaryDirectory() as tmp:
             book=ResearchBook(Path(tmp)/'research.db')
             legacy='gap_'+canonical_hash(['300750','financials'])[:24]

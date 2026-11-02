@@ -395,8 +395,10 @@ class AfterCloseTests(unittest.TestCase):
         roles.client.complete = capture
         with self.assertRaisesRegex(RuntimeError, 'captured_before_model'):
             asyncio.run(roles.call('risk-manager', json.dumps(log)))
-        self.assertEqual(captured['input']['decisions'], log['decisions'])
-        self.assertEqual(captured['input']['investment_cases'], log['investment_cases'])
+        from agent.reference_slots import rewrite_references
+        restored=rewrite_references(captured['input'],{v:k for k,v in roles.slots.items()})
+        self.assertEqual(restored['decisions'], log['decisions'])
+        self.assertEqual(restored['investment_cases'], log['investment_cases'])
         self.assertNotIn('predictions', captured['input'])
         self.assertEqual(roles.client.requests_started, 0)
 

@@ -55,7 +55,7 @@ def public_case(row):
     result = pick(row, "symbol research_status position_intent thesis thesis_horizon_years thesis_change target_weight entry_condition exit_condition next_review_date")
     result["valuation"] = pick(row.get("valuation", {}), "method bear_price base_price bull_price assumptions")
     if "core_gaps" in row:
-        result["core_gaps"] = [pick(gap, "category reason what_to_fetch") for gap in row["core_gaps"]]
+        result["core_gaps"] = [pick(gap, "category reason what_to_fetch gap_type") for gap in row["core_gaps"]]
     return result
 
 

@@ -169,7 +169,7 @@ def build_view(payload, ledger, logs, initial=1_000_000):
             warnings.append(symbol + "缺少跟踪起点价格，不补造买入持有对照")
         stocks.append({"symbol": symbol, "name": names.get(symbol, symbol), "series": series,
             **studied.get(symbol, {"analysis_date": None, "decision_at": None, "research_mode": "unreviewed"}),
-            "tracking_status": "held" if symbol in actual_quantities else "research_pending" if cases.get(symbol, {}) and cases[symbol].get("research_status") == "pending" else "observing" if symbol in decisions else "unreviewed",
+            "tracking_status": "held" if symbol in actual_quantities else 'research_rejected' if (cases.get(symbol) or {}).get('research_status')=='rejected' else "research_pending" if cases.get(symbol, {}) and cases[symbol].get("research_status") == "pending" else "observing" if symbol in decisions else "unreviewed",
             "actual_weight": round(sum(p["market_value"] or 0 for p in positions if p["symbol"] == symbol) / points[-1]["total"], 6) if current_complete and points[-1]["total"] > 0 else None,
             "last_close": last["close"], "daily_change_pct": round((last["close"] / previous["close"] - 1) * 100, 3),
             "decision": decisions.get(symbol), "prediction": predictions.get(symbol),

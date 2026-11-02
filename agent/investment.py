@@ -16,6 +16,8 @@ from agent.research_tasks import TaskTracker
 
 VERSION = "long-term-investment-v1"
 PROMPT_VERSION = "manager-long-v3"
+RESEARCH_PROTOCOL = 'research-completion-v1'
+GAP_TYPES = {'missing_disclosure', 'unreadable_source', 'source_conflict'}
 POLICY = {"version": VERSION, "thesis_horizon_years": 3, "evaluation_horizon_days": 252,
           "review_calendar_days": 90, "news_role": "thesis_change_monitor", "force_investment": False}
 CATEGORIES = {"business", "financials", "industry"}
@@ -80,7 +82,11 @@ LONG_INSTRUCTIONS = (
     "将受控候选和已有持仓按长期收益依据、估值、风险及证据充分性比较，同时说明继续持有现金的理由。"
     "可以分批配置多家公司，仓位表达判断强弱；不能为凑持股数量强迫买入。核心事实缺失与正常的未来不确定性须区分。"
     "必须区分研究未完成(research_pending)、论证可用但价格不合适(wait_price)、建仓(build)、"
-    "继续持有(hold)、减仓(reduce)、退出(exit)。辅助数据缺失记non_core_gaps，不得一概否决。"
+    "继续持有(hold)、减仓(reduce)、退出(exit)、放弃候选(reject)。辅助数据缺失记non_core_gaps，不得一概否决。"
+    "先核对已披露的关键经营事实，再以明确假设评估未来；未来增长、ROE或估值倍数不是能从公告取得的确定事实。"
+    "核心缺口gap_type只可为missing_disclosure、unreadable_source、source_conflict，说明具体历史事实或来源问题与获取动作。"
+    "关键事实足够时完成有条件估值并选建仓或等待价格；证据表明投资论点不成立时可用rejected/reject、零目标仓位，entry_condition写重新研究的具体触发。"
+    "放弃须引用可用公司披露、thesis_change为invalidated且不带核心缺口；缺资料或采集失败仍为pending，不能冒充负面投资结论。已有持仓不得用reject代替持有、减仓或退出审核。"
     "核心业务/财务/估值缺口需明确what_to_fetch及重新评估条件，不能靠含糊HOLD无限拖延。"
     "缺口不得编造补齐；有据的风险退出不要求先补齐全部增长材料。不要为了增加交易而强迫买入。"
     "旧投资论证是模型观点，不是外部证据；结合当时可用资料更新，只有实质变化才修改论证。"
@@ -91,18 +97,19 @@ LONG_INSTRUCTIONS = (
 def result_schema(base):
     value = deepcopy(base)
     value["properties"]["investment_policy"] = {"type": "string", "enum": [VERSION]}
+    value['properties']['research_protocol'] = {'type':'string','enum':[RESEARCH_PROTOCOL]}
     value["properties"]["predictions"]["items"]["properties"]["horizon_days"] = {"type": "integer", "enum": [252]}
     from agent.evidence import LINK_SCHEMA
     text = {"type": "string"}
     number = {"type": ["number", "null"]}
     gap = {"type": "object", "additionalProperties": False, "properties": {
         "category": {"type": "string", "enum": ["business", "financials", "valuation"]},
-        "reason": text, "what_to_fetch": text}, "required": ["category", "reason", "what_to_fetch"]}
+        "reason": text, "what_to_fetch": text, 'gap_type': {'type':'string','enum':sorted(GAP_TYPES)}}, "required": ["category", "reason", "what_to_fetch", 'gap_type']}
     valuation = {"type": "object", "additionalProperties": False, "properties": {
         "method": text, "bear_price": number, "base_price": number, "bull_price": number, "assumptions": text},
         "required": ["method", "bear_price", "base_price", "bull_price", "assumptions"]}
-    props = {"symbol": text, "research_status": {"type": "string", "enum": ["pending", "ready"]},
-        "position_intent": {"type": "string", "enum": ["research_pending", "wait_price", "build", "hold", "reduce", "exit"]},
+    props = {"symbol": text, "research_status": {"type": "string", "enum": ["pending", "ready", 'rejected']},
+        "position_intent": {"type": "string", "enum": ["research_pending", "wait_price", "build", "hold", "reduce", "exit", 'reject']},
         "thesis": text, "thesis_horizon_years": {"type": "integer", "enum": [3]},
         "thesis_change": {"type": "string", "enum": ["new", "unchanged", "updated", "invalidated"]},
         "target_weight": {"type": "number"}, "valuation": valuation, "entry_condition": text,
@@ -110,7 +117,7 @@ def result_schema(base):
         "non_core_gaps": {"type": "array", "items": text}, "evidence": deepcopy(LINK_SCHEMA)}
     value["properties"]["investment_cases"] = {"type": "array", "items": {"type": "object", "additionalProperties": False,
         "properties": props, "required": list(props)}}
-    value["required"] += ["investment_policy", "investment_cases"]
+    value["required"] += ["investment_policy", "investment_cases", 'research_protocol']
     return value
 
 
@@ -120,6 +127,11 @@ def _text(value, label):
 
 
 def validate_cases(result, symbols, *, catalog=None, as_of=None, account=None, prices=None):
+    if account is None:
+        account = result.get('account_snapshot') or result.get('input_dataset',{}).get('account')
+    modern = result.get('research_protocol') == RESEARCH_PROTOCOL
+    if result.get('research_protocol') is not None and not modern:
+        raise ValueError('未知研究完成协议')
     if result.get("investment_policy") != VERSION:
         raise ValueError("长期输出缺少正确策略协议")
     cases = result.get("investment_cases")
@@ -128,7 +140,7 @@ def validate_cases(result, symbols, *, catalog=None, as_of=None, account=None, p
     proposed = result.get("risk_review", {}).get("proposed_decisions") or result["decisions"]
     plans = {row["symbol"]: row for row in proposed}
     for row in cases:
-        if row.get("research_status") not in {"pending", "ready"} or row.get("position_intent") not in {"research_pending", "wait_price", "build", "hold", "reduce", "exit"}:
+        if row.get("research_status") not in {"pending", "ready", 'rejected'} or row.get("position_intent") not in {"research_pending", "wait_price", "build", "hold", "reduce", "exit", 'reject'}:
             raise ValueError("长期研究状态或持仓意图非法")
         if row.get("thesis_horizon_years") != 3:
             raise ValueError("长期论证须声明三年观察框架")
@@ -146,6 +158,8 @@ def validate_cases(result, symbols, *, catalog=None, as_of=None, account=None, p
         if not isinstance(gaps, list) or not isinstance(row.get("non_core_gaps"), list):
             raise ValueError("核心/辅助缺口必须分开记录")
         for gap in gaps:
+            if modern and gap.get('gap_type') not in GAP_TYPES:
+                raise ValueError('核心缺口须注明已披露事实或来源问题类型')
             if gap.get("category") not in {"business", "financials", "valuation"}:
                 raise ValueError("未知核心补证类别")
             _text(gap.get("reason"), "缺口原因")
@@ -157,9 +171,20 @@ def validate_cases(result, symbols, *, catalog=None, as_of=None, account=None, p
         if row["research_status"] == "ready" and gaps:
             raise ValueError("核心缺口未解决不能声称研究完成")
         plan, intent = plans[row["symbol"]], row["position_intent"]
-        allowed = {"research_pending": "HOLD", "wait_price": "HOLD", "hold": "HOLD", "build": "BUY", "reduce": "SELL", "exit": "SELL"}
+        allowed = {"research_pending": "HOLD", "wait_price": "HOLD", "hold": "HOLD", "build": "BUY", "reduce": "SELL", "exit": "SELL", 'reject':'HOLD'}
         if plan["action"] != allowed[intent]:
             raise ValueError("长期持仓意图与送审计划不一致")
+        held = next((p.get('shares',0) for p in (account or {}).get('positions',[]) if p['symbol']==row['symbol']),0)
+        if modern and intent == 'hold' and account is not None and not held:
+            raise ValueError('空仓须明确待补证、等待价格或放弃候选，不能写继续持有')
+        if modern and intent == 'research_pending' and row['research_status'] != 'pending':
+            raise ValueError('待补证意图须对应未完成研究')
+        if intent == 'reject' or row['research_status'] == 'rejected':
+            if not modern or intent != 'reject' or row['research_status'] != 'rejected' or gaps or weight != 0 or held or row['thesis_change'] != 'invalidated' or plan['shares'] != 0:
+                raise ValueError('放弃候选须为有据的空仓否定论点，资料不足或已有持仓不得使用')
+            source_catalog = catalog or result.get('evidence_audit',{}).get('catalog')
+            if not row['evidence'].get('supporting_ids') or (source_catalog is not None and not any(r['kind']=='company_document' and r['eligible'] and r['evidence_id'] in row['evidence']['supporting_ids'] for r in source_catalog['records'])):
+                raise ValueError('放弃候选须引用本轮可用公司披露')
         valuation = row.get("valuation", {})
         _text(valuation.get("method"), "估值方法或不可估值原因")
         _text(valuation.get("assumptions"), "估值假设或资料缺口")
@@ -281,7 +306,7 @@ class ResearchBook(TaskTracker):
                         (task_id, symbol, category, day, day, status, json.dumps(task, ensure_ascii=False)))
                     self._task_event(conn, {**task, 'opened_at': opened, 'updated_at': day})
                     tasks.append(task)
-                for old_task in conn.execute("SELECT payload,status FROM tasks WHERE symbol=? AND id LIKE 'gap_%' AND status NOT IN ('resolved','migrated') AND updated_at<=?", (symbol, day)):
+                for old_task in conn.execute("SELECT payload,status FROM tasks WHERE symbol=? AND id LIKE 'gap_%' AND status NOT IN ('resolved','migrated','closed_rejected') AND updated_at<=?", (symbol, day)):
                     task = json.loads(old_task[0])
                     task["status"] = "overdue" if day > task["review_by"] else old_task[1]
                     tasks.append(task)
@@ -327,12 +352,18 @@ class ResearchBook(TaskTracker):
     def review_order(self, symbols, day, logs=()):
         """Unreviewed companies first, then oldest review; no new model request."""
         last = {}
+        latest_cases = {}
         excluded = self.quality.blocked()
+        from evals.metrics import uses_synthetic_data
+        formal_hashes = {canonical_hash(log) for log in logs if log.get('execution_mode')=='paper'
+                         and not uses_synthetic_data(log) and (log.get('timing',{}).get('decision_at') or log.get('generated_at') or log.get('date',''))[:10] <= day}
         if self.path.exists():
             with closing(sqlite3.connect(f"file:{self.path.resolve().as_posix()}?mode=ro", uri=True)) as conn:
-                for symbol, reviewed, log_hash in conn.execute('SELECT symbol,day,log_hash FROM cases WHERE day<=? ORDER BY day', (day,)):
+                for symbol, reviewed, log_hash, payload in conn.execute('SELECT symbol,day,log_hash,payload FROM cases WHERE day<=? ORDER BY day,rowid', (day,)):
                     if log_hash not in excluded:
                         last[symbol] = reviewed
+                        if log_hash in formal_hashes:
+                            latest_cases[symbol] = json.loads(payload)
         from evals.metrics import uses_synthetic_data
         for log in logs:
             stamp = (log.get("timing", {}).get("decision_at") or log.get("generated_at") or log.get("as_of_date") or log.get("date", ""))[:10]
@@ -341,7 +372,8 @@ class ResearchBook(TaskTracker):
             for row in log.get("decisions", []):
                 last[row["symbol"]] = max(last.get(row["symbol"], ""), stamp)
         allowed = {row["symbol"] for row in MARKETS["cn"]["candidate_universe"]}
-        return sorted((set(symbols) | set(last)) & allowed, key=lambda symbol: (last.get(symbol, ""), symbol))
+        deferred = {s for s,c in latest_cases.items() if c.get('research_status')=='rejected' and c.get('next_review_date','') > day}
+        return sorted(((set(symbols) | set(last)) & allowed)-deferred, key=lambda symbol: (last.get(symbol, ""), symbol))
 
 
 async def prepare_context(host, day, symbols, variant=None, book=None):
