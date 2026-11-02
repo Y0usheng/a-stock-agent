@@ -11,7 +11,7 @@ import pandas as pd
 from agent.analysis import AnalysisHost
 from agent.contracts import capture_risk_review, validate_decision_result
 from agent.evidence import build_catalog, validate_evidence_audit
-from agent.investment import (VERSION, PROMPT_VERSION, POLICY, ResearchBook, case_variant,
+from agent.investment import (VERSION, PROMPT_VERSION, POLICY, RESEARCH_PROTOCOL, ResearchBook, case_variant,
                               prepare_context, validate_cases)
 from agent.subscription import subscription_workspace
 from agent.subscription_roles import export_paper_context
@@ -48,11 +48,11 @@ def example(ready=True):
             "base_price": 120. if ready else None, "bull_price": 160. if ready else None, "assumptions": "明确的测试假设，不代表真实估值"},
         "entry_condition": "核对资料并达到估值条件", "exit_condition": "经营论证被否定或风险超限",
         "next_review_date": (date.fromisoformat(DAY) + timedelta(days=90 if ready else 7)).isoformat(),
-        "core_gaps": [] if ready else [{"category": "financials", "reason": "缺原文", "what_to_fetch": "取得有披露时间的现金流与负债原文片段"}],
+        "core_gaps": [] if ready else [{"category": "financials", 'gap_type':'missing_disclosure', "reason": "缺原文", "what_to_fetch": "取得有披露时间的现金流与负债原文片段"}],
         "non_core_gaps": ["无当日新闻"], "evidence": annotation}
     review = {"summary": "fixture", "assessments": [{"symbol": "300750", "action": decisions[0]["action"], "verdict": "APPROVE",
         "max_shares": decisions[0]["shares"], "reason": "fixture", "evidence": annotation}]}
-    log = {"market": "cn", "date": DAY, "as_of_date": DAY, "investment_policy": VERSION, "summary": "fixture", "execution_mode": "shadow",
+    log = {"market": "cn", "date": DAY, "as_of_date": DAY, "investment_policy": VERSION, 'research_protocol':RESEARCH_PROTOCOL, "summary": "fixture", "execution_mode": "shadow",
         "execution": {"orders_submitted": 0}, "analyst_views": {"technical": "t", "fundamental": "f", "risk": "r"}, "memory_assessment": "none",
         "decisions": decisions, "investment_cases": [case], "predictions": [{"symbol": "300750", "direction": "up", "horizon_days": 252,
             "confidence": .55, "rationale": "一年阶段观察，不是每日买卖开关", "evidence": links(price_ids)}],

@@ -15,7 +15,7 @@ TOPICS = ('客户集中', '客户资产', '零售客户', '存款结构', '存�
           '产品结构', '直销', '经销', '销量', '价格', '合同负债', '渠道库存', '受限资金',
           '产量', '单位成本', '矿种', '项目回报', '资本承诺', '债务到期', '现金流',
           '净利润', '净资产', '营业收入', '资本开支', '分红', '负债', '成本', '竞争')
-FINAL = {'resolved', 'migrated', 'quarantined'}
+FINAL = {'resolved', 'migrated', 'quarantined', 'closed_rejected'}
 
 
 def questions(gap):
@@ -123,6 +123,10 @@ class TaskTracker:
                         'status': existing.get('status', 'open') if existing.get('status') not in FINAL else 'open'}
                 if day > due:
                     task['status'] = 'overdue'
+                self._put_task(conn, task, day)
+        if case['research_status'] == 'rejected':
+            for task in active:
+                task.update(status='closed_rejected', closed_by_log_hash=canonical_hash(log), resolution='thesis_rejected_not_fact_resolved')
                 self._put_task(conn, task, day)
         if case['research_status'] == 'ready':
             refs = set(case['evidence'].get('supporting_ids', []))

@@ -274,7 +274,8 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
             receipt["errors"].append({"symbol": symbol, "reason": "total_budget_exhausted"})
             continue
         stage = "index"
-        tasks = [row for row in book.tasks() if row.get("symbol") == symbol and row.get('status') not in {'resolved','quarantined','migrated'}]
+        from agent.research_tasks import FINAL
+        tasks = [row for row in book.tasks() if row.get("symbol") == symbol and row.get('status') not in FINAL]
         # Bounded source presentation rotates without increasing research calls.
         if len(tasks) > 3:
             shift = event_time(cutoff, 'cn').date().toordinal()*3 % len(tasks)
