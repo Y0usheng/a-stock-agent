@@ -7,7 +7,7 @@
 <header><div class="top"><div><div class="eyebrow">PUBLIC / PAPER INVESTING</div><h1>长期模拟投资 · 每日记录</h1></div><span class="badge">A股 · 虚拟资金 · 公开只读</span></div>
 <p>本机完成研究后发布结果。选择日期，查看判断、持仓、真实曲线与扣费收益。</p>
 <p>当前默认：AI自主模拟交易，无需逐笔人工确认；独立风控通过后排定未来收盘计划。复盘策略须通过测试、时间顺序对照和回滚检查才更新。历史报告保留当时实际模式。</p>
-<div class="controls"><label for="report-date">报告日期</label><button id="previous" aria-label="上一份报告">← 较早</button><select id="report-date" aria-label="选择报告日期"></select><button id="next" aria-label="下一份报告">较新 →</button><a id="permalink" href="?">分享此日期 ↗</a></div>
+<div class="controls"><label for="report-date">报告日期</label><button id="previous" aria-label="上一份报告">← 较早</button><select id="report-date" aria-label="选择报告日期"></select><button id="next" aria-label="下一份报告">较新 →</button><button id="toggle-history" aria-expanded="false" hidden>全部历史</button><a id="permalink" href="?">分享此日期 ↗</a></div>
 <p id="report-state" class="state"></p></header>
 <div id="empty" class="empty" hidden>还没有发布真实研究报告。等待本机运行并发布后，这里会出现可选日期；不会自动生成模拟成交或历史收益。</div>
 <iframe id="report-frame" title="所选日期的模拟投资报告" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" hidden></iframe>
@@ -16,18 +16,29 @@
 <script>
 const archive=JSON.parse(document.getElementById('archive-data').textContent), reports=archive.reports;
 const select=document.getElementById('report-date'), frame=document.getElementById('report-frame'), state=document.getElementById('report-state');
+const historyButton=document.getElementById('toggle-history'), recentLimit=3;
+let expanded=false;
+function visibleReports(){return expanded?reports:reports.slice(0,recentLimit);}
+function fillDates(date){
+ const visible=visibleReports();select.replaceChildren();
+ for(const report of visible){const option=document.createElement('option');option.value=report.date;option.textContent=report.date;select.appendChild(option);}
+ historyButton.hidden=reports.length<=recentLimit;
+ historyButton.textContent=expanded?'收起旧报告':`全部历史（${reports.length}）`;
+ historyButton.setAttribute('aria-expanded',String(expanded));
+ if(visible.length)show(visible.some(r=>r.date===date)?date:visible[0].date);
+}
 function show(date){
- const i=reports.findIndex(r=>r.date===date);if(i<0)return;
- const r=reports[i];select.value=r.date;frame.src=r.href;frame.hidden=false;
+ const visible=visibleReports(), i=visible.findIndex(r=>r.date===date);if(i<0)return;
+ const r=visible[i];select.value=r.date;frame.src=r.href;frame.hidden=false;
  state.textContent=`行情截至 ${r.price_date||'未知'} · 最近公司分析 ${r.analysis_date||'无'} · ${r.mode}`+(r.price_date<r.date?' · 行情尚未更新至报告日':'');
  state.className=r.price_date<r.date?'state warning':'state';
- document.getElementById('previous').disabled=i===reports.length-1;document.getElementById('next').disabled=i===0;
+ document.getElementById('previous').disabled=i===visible.length-1;document.getElementById('next').disabled=i===0;
  const url=new URL(location.href);url.searchParams.set('date',r.date);history.replaceState(null,'',url);document.getElementById('permalink').href=url.href;
 }
-for(const report of reports){const option=document.createElement('option');option.value=report.date;option.textContent=report.date;select.appendChild(option);}
 select.onchange=()=>show(select.value);
-document.getElementById('previous').onclick=()=>{const i=reports.findIndex(r=>r.date===select.value);if(i+1<reports.length)show(reports[i+1].date);};
-document.getElementById('next').onclick=()=>{const i=reports.findIndex(r=>r.date===select.value);if(i>0)show(reports[i-1].date);};
-if(reports.length){const requested=new URLSearchParams(location.search).get('date');show(reports.some(r=>r.date===requested)?requested:reports[0].date);}
+historyButton.onclick=()=>{expanded=!expanded;fillDates(select.value);};
+document.getElementById('previous').onclick=()=>{const visible=visibleReports(),i=visible.findIndex(r=>r.date===select.value);if(i+1<visible.length)show(visible[i+1].date);};
+document.getElementById('next').onclick=()=>{const visible=visibleReports(),i=visible.findIndex(r=>r.date===select.value);if(i>0)show(visible[i-1].date);};
+if(reports.length){const requested=new URLSearchParams(location.search).get('date');expanded=reports.findIndex(r=>r.date===requested)>=recentLimit;fillDates(requested);}
 else{document.getElementById('empty').hidden=false;select.disabled=true;document.getElementById('previous').disabled=true;document.getElementById('next').disabled=true;state.textContent='暂无公开记录';}
 </script></body></html>

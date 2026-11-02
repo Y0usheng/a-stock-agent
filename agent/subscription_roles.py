@@ -228,7 +228,7 @@ def subscription_manifest(manifest: dict) -> dict:
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
-            "company_projection": "source-table-financial-rows-v4", "financial_protocol": "source-financial-rows-v1", "output_text_limit": 160, "manager_history_samples": 5,
+            "company_projection": "source-table-financial-rows-v5", "financial_protocol": "source-financial-rows-v2", "output_text_limit": 160, "manager_history_samples": 5,
             "company_news_per_symbol": 1, "empty_learning": "counts_only"})
     return value
 

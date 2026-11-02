@@ -4,7 +4,7 @@ import re
 
 from evals.experiments import canonical_hash
 
-VERSION = 'source-financial-rows-v1'
+VERSION = 'source-financial-rows-v2'
 LABELS = {
     'eps': ('基本每股收益',), 'bvps': ('每股净资产',),
     'roe': ('加权平均净资产收益率', '平均净资产收益率'),
@@ -21,6 +21,46 @@ PRIORITY = ('eps', 'bvps', 'roe', 'npl_ratio', 'net_interest_margin', 'provision
             'special_mention_ratio', 'credit_cost', 'capital_ratio', 'operating_cashflow',
             'capex_cash', 'cash', 'short_borrowings', 'long_borrowings', 'bonds', 'revenue')
 MONEY = re.compile(r'(?:单位\s*[:：]\s*(?:人民币)?|[（(]人民币)(百万元|千元|万元|亿元|元)')
+YEAR = re.compile(r'20\d{2}')
+COLUMN_PERIOD = re.compile(r'20\d{2}\s*年(?:\s*(?:\d{1,2}\s*(?:[-－—–至]\s*\d{1,2})?\s*月'
+                           r'(?:\s*\d{1,2}\s*日)?|(?:前[一二三四1-4]|第[一二三四1-4])季度|半年度|度|末))?')
+
+
+def table_column(anchors, year):
+    headers = [a['text'].strip() for a in anchors if len(YEAR.findall(a['text'])) >= 2]
+    if not headers:
+        return None
+    header = headers[-1]
+    years = YEAR.findall(header)
+    if years[0] != year:
+        return None
+    periods = COLUMN_PERIOD.findall(header)
+    if len(set(years)) == 1:
+        # A repeated year alone cannot distinguish quarterly and cumulative columns.
+        # A multiline year row may continue the immediately preceding period row.
+        if len(periods) != len(years) or any(re.fullmatch(r'20\d{2}\s*年', p) for p in periods):
+            if len(headers) < 2 or YEAR.findall(headers[-2]) != years:
+                return None
+            header = headers[-2]
+            periods = COLUMN_PERIOD.findall(header)
+        if len(periods) != len(years) or any(re.fullmatch(r'20\d{2}\s*年', p) for p in periods):
+            return None
+    if not periods:
+        return None
+    return header, re.sub(r'\s+', '', periods[0]), len(years)
+
+
+def first_value(cells, header, columns):
+    blocks = re.split(r'\s{2,}', cells.strip())
+    token_index = 0
+    if '附注' in header:
+        # Sorted text omits empty cells. Only consume an explicit note cell when
+        # all dated value columns are present; missing cells remain ambiguous.
+        if len(blocks) != columns + 1 or not re.fullmatch(r'(?:[（(]?\d+[)）]?|[一二三四五六七八九十]+[、.]\d+|[—−-])', blocks[0]):
+            return None
+        token_index = 1
+    cell = re.fullmatch(r'([−-]?\d[\d,]*(?:\.\d+)?)(%)?', blocks[token_index])
+    return (cell, token_index) if cell else None
 
 
 def report_period(extracted):
@@ -59,7 +99,7 @@ def extract_facts(document, extracted):
                 statement_scope, anchors, history = 'consolidated', [], []
             elif re.fullmatch(r'(?:母公司|本行)(?:资产负债表|现金流量表|利润表|综合收益表)(?:[（(]续[)）])?', heading):
                 statement_scope, anchors, history = 'parent', [], []
-            if MONEY.search(line) or len(set(re.findall(r'20\d{2}', line))) >= 2:
+            if MONEY.search(line) or len(YEAR.findall(line)) >= 2:
                 anchors.append({'text':line, 'pdf_page':page['pdf_page'], 'start':offset,
                                 'end':offset+len(line), 'page_text_hash':page['text_hash']})
                 anchors = anchors[-6:]
@@ -90,13 +130,12 @@ def extract_facts(document, extracted):
                 usable_anchors = [a for a in anchors if a['pdf_page']==page['pdf_page'] or
                                   statement_scope=='consolidated' and 0 < page['pdf_page']-a['pdf_page'] <= 3]
                 context = ''.join(a['text'] for a in usable_anchors) + ''.join(history[-35:])
-                headers = [a['text'].strip() for a in usable_anchors if len(set(re.findall(r'20\d{2}', a['text']))) >= 2]
-                # No guessing which column belongs to which year, or switching columns.
-                years = re.findall(r'20\d{2}', headers[-1]) if headers else []
-                cell = re.match(r'\s*([−-]?\d[\d,]*(?:\.\d+)?)(%)?(?:\s|$)', cells)
+                column = table_column(usable_anchors, year)
+                selected = first_value(cells, column[0], column[2]) if column else None
                 summary = page['pdf_page'] <= 40 and ('会计数据' in text or '财务指标' in text)
                 scope_ok = summary or statement_scope == 'consolidated'
-                if cell and years and years[0] == year and scope_ok:
+                if selected and scope_ok:
+                    cell, token_index = selected
                     if metric in {'eps', 'bvps'}:
                         unit = '元/股' if re.search(r'人民币元|元[／/]股|每股.*?[（(]元[)）]', context + label) else None
                     elif metric in {'roe', 'npl_ratio', 'capital_ratio', 'net_interest_margin',
@@ -109,7 +148,8 @@ def extract_facts(document, extracted):
                         value = cell[1].replace(',', '').replace('−', '-')
                         fact = {'metric': metric, 'label': label.strip(), 'value': value, 'unit': unit,
                                 'period': period, 'scope': 'group_summary' if summary else 'consolidated',
-                                'column_header': headers[-1], 'pdf_page': page['pdf_page'],
+                                'column_header': column[0], 'column_period': column[1],
+                                'value_token_index': token_index, 'pdf_page': page['pdf_page'],
                                 'source_context': usable_anchors,
                                 'source_line': text[source_start:source_end], 'start': source_start, 'end': source_end,
                                 'page_text_hash': page['text_hash']}
@@ -123,7 +163,7 @@ def extract_facts(document, extracted):
 def render_facts(facts, limit=700):
     if not facts:
         return ''
-    text = '正文报告期间：' + facts[0]['period'] + '；以下逐行注明单位与PDF页序，均为首列当期数。'
+    text = '正文报告期间：' + facts[0]['period'] + '；以下按表头绑定当期数，逐行注明期间、单位与PDF页序。'
     for fact in facts:
         line = '\n' + fact_line(fact)
         if len(text) + len(line) > limit:
@@ -133,8 +173,8 @@ def render_facts(facts, limit=700):
 
 
 def fact_line(fact):
-    years = list(re.finditer(r'20\d{2}', fact['column_header']))
-    column = fact['column_header'][years[0].start():years[1].start()].strip() if len(years)>1 else ''
+    years = list(YEAR.finditer(fact['column_header']))
+    column = fact.get('column_period') or (fact['column_header'][years[0].start():years[1].start()].strip() if len(years)>1 else '')
     column = re.sub(r'\s+', '', column)
     # Retain explicit YTD or balance-sheet dates; the report title alone cannot
     # distinguish a quarterly flow from cumulative January-to-September figures.
