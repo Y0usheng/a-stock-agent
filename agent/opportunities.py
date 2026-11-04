@@ -40,9 +40,9 @@ INSTRUCTIONS = (
     "transient不能入选。候选公司只能在该主题给出的possible_symbols中选择；映射只是待核实的业务关系。"
     "每个主题都要评价，保留否定判断；所有引用必须来自该主题事件。"
     "按主题键逐一输出。evidence的E1/E2只对应本主题相同ref的新闻，各选support/contradict/unused之一。"
-    "support或contradict须摘录excerpt中12至60字连续原句；unused的quote填空字符串。"
+    "support或contradict须逐字摘录excerpt中12至80个字符的连续原句，数字和标点也各计1字符；不足12字符不能引用。unused的quote必须为空字符串。"
     "来源类型由宿主按原始记录绑定。只在mechanism写自己的推断，不能把媒体转述写成公司披露。"
-    "为满足单轮限时，每个解释字段只写一句、最多60个汉字，不重复新闻背景；引文只取能支撑判断的12至60字连续原句。"
+    "为满足单轮限时，每个解释字段只写一句、最多60个汉字，不重复新闻背景；引文优先取能支撑判断的12至60个字符的连续原句。"
     "逐主题给出简洁结论，最多2家受益候选；不为填满名额强选股票。"
 )
 
@@ -295,12 +295,19 @@ def wire_review_schema(leads):
     """Fixed topic/event slots prevent cross-topic IDs and contradictory double citation."""
     properties = {}
     common = deepcopy(review_schema(leads)["properties"]["themes"]["items"]["properties"])
+    quote = deepcopy(common["source_observations"]["items"]["properties"]["quote"])
     for field in ("theme_id", "source_observations", "supporting_event_ids", "contradicting_event_ids", "beneficiary_symbols"):
         common.pop(field)
     definitions = {"judgment": {"type": "object", "properties": common, "required": list(common), "additionalProperties": False},
-        "citation": {"type": "object", "additionalProperties": False, "properties": {
-            "stance": {"type": "string", "enum": ["support", "contradict", "unused"]},
-            "quote": {"type": "string", "maxLength": 80}}, "required": ["stance", "quote"]}}
+        # Constrain generation as well as the restored review. A shared quote
+        # contract prevents native output from accepting a later-invalid fragment.
+        "citation": {"anyOf": [
+            {"type": "object", "additionalProperties": False, "properties": {
+                "stance": {"type": "string", "enum": ["support", "contradict"]},
+                "quote": quote}, "required": ["stance", "quote"]},
+            {"type": "object", "additionalProperties": False, "properties": {
+                "stance": {"type": "string", "enum": ["unused"]},
+                "quote": {"type": "string", "enum": [""]}}, "required": ["stance", "quote"]}]}}
     for lead in leads:
         props = {"judgment": {"$ref": "#/$defs/judgment"}}
         symbols = lead["possible_symbols"]
