@@ -1,0 +1,46 @@
+{
+  "protocol": "research-source-cases-v1",
+  "annotation": "Original-PDF source audit on 2026-11-04 and 2026-11-05; regression cases target observed omissions, not marketwide recall. No original PDFs, credentials or ledgers are distributed.",
+  "cases": [
+    {
+      "id": "cmb-2026q3", "symbol": "600036", "title": "招商银行股份有限公司2026年第三季度报告", "published_at": "2026-10-31", "document_type": "interim", "announcement_id": "1225649239",
+      "url": "https://static.cninfo.com.cn/finalpage/2026-10-31/1225649239.PDF",
+      "pdf_sha256": "41330517043bdff6350195aec6efad906555f3268aaa8dd386cf7257b0531d7c",
+      "facts": [
+        {"id": "npl", "pdf_page": 4, "text": "不良贷款率0.94%"},
+        {"id": "provision", "pdf_page": 4, "text": "拨备覆盖率389.39%"},
+        {"id": "margin", "pdf_page": 4, "text": "净利息收益率1.82%"},
+        {"id": "capital", "pdf_page": 10, "text": "核心一级资本充足率14.39%"},
+        {"id": "impairment", "pdf_page": 6, "text": "信用减值损失417.75亿元，同比增长25.26%"}
+      ]
+    },
+    {
+      "id": "cmb-2025annual", "symbol": "600036", "title": "招商银行股份有限公司2025年度报告", "published_at": "2026-03-28", "document_type": "annual", "announcement_id": "1225047590",
+      "url": "https://static.cninfo.com.cn/finalpage/2026-03-28/1225047590.PDF",
+      "pdf_sha256": "abe612a273468072b176dd51ea460c1e1596f8ca729cbc6db3fa28ba9a57ea79",
+      "facts": [{"id": "retail_business", "pdf_page": 43, "text": "零售金融业务对本公司营收和利润的贡献占比均在50%以上"}]
+    },
+    {
+      "id": "hengrui-2025annual", "symbol": "600276", "title": "恒瑞医药2025年年度报告", "published_at": "2026-03-26", "document_type": "annual", "announcement_id": "1225032585",
+      "url": "https://static.cninfo.com.cn/finalpage/2026-03-26/1225032585.PDF",
+      "pdf_sha256": "fae80e2d132f5b6f2bfbb8bcdfd40e1267edb91d689389d63c8e291b0856ace6",
+      "facts": [
+        {"id": "innovative_sales", "pdf_page": 19, "text": "创新药销售收入163.42亿元"},
+        {"id": "rd_total", "pdf_page": 19, "text": "累计研发投入87.24亿元"},
+        {"id": "rd_expense", "pdf_page": 19, "text": "费用化研发投入69.61亿元"},
+        {"id": "adjusted_profit", "pdf_page": 19, "text": "扣除非经常性损益的净利润74.13亿元"},
+        {"id": "licensing", "pdf_page": 6, "text": "MSD2亿美元"}
+      ]
+    },
+    {
+      "id": "hengrui-2026q3", "symbol": "600276", "title": "恒瑞医药2026年第三季度报告", "published_at": "2026-10-28", "document_type": "interim", "announcement_id": "1225629197",
+      "url": "https://static.cninfo.com.cn/finalpage/2026-10-28/1225629197.PDF",
+      "pdf_sha256": "9fc0702f6de6d25d8bd2e8bfdbc57cc69b964459f38db9d87be83baa9dc0c073",
+      "facts": [
+        {"id": "innovative_sales", "pdf_page": 4, "text": "创新药销售收入138.71亿元"},
+        {"id": "rd_total", "pdf_page": 4, "text": "累计研发投入71.46亿元"},
+        {"id": "rd_expense", "pdf_page": 4, "text": "费用化研发投入54.23亿元"}
+      ]
+    }
+  ]
+}

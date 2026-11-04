@@ -17,7 +17,7 @@ from agent.research_tasks import TaskTracker
 VERSION = "long-term-investment-v1"
 PROMPT_VERSION = "manager-long-v3"
 RESEARCH_PROTOCOL = 'research-completion-v1'
-GAP_TYPES = {'missing_disclosure', 'unreadable_source', 'source_conflict'}
+GAP_TYPES = {'missing_disclosure', 'unreadable_source', 'source_conflict', 'input_omission'}
 POLICY = {"version": VERSION, "thesis_horizon_years": 3, "evaluation_horizon_days": 252,
           "review_calendar_days": 90, "news_role": "thesis_change_monitor", "force_investment": False}
 CATEGORIES = {"business", "financials", "industry"}
@@ -55,6 +55,15 @@ def select_materials(rows, limit=4):
     selected = []
     for category in ("business", "financials", "industry"):
         candidates = [item for item in rows if category in item["categories"]]
+        if category == 'business':
+            questions = [r for r in candidates if r.get('question_protocol')]
+            if questions:
+                questions.sort(key=lambda r: (str(r.get('published_at', '')), str(r.get('first_seen_at', ''))), reverse=True)
+                for kind in ('annual', 'interim'):
+                    row = next((r for r in questions if r.get('document_type') == kind), None)
+                    if row and row not in selected:
+                        selected.append(row)
+                continue
         if category == "financials":
             usable = [item for item in candidates if item.get("unit_context_present") is not False]
             candidates = usable or candidates
@@ -84,7 +93,8 @@ LONG_INSTRUCTIONS = (
     "必须区分研究未完成(research_pending)、论证可用但价格不合适(wait_price)、建仓(build)、"
     "继续持有(hold)、减仓(reduce)、退出(exit)、放弃候选(reject)。辅助数据缺失记non_core_gaps，不得一概否决。"
     "先核对已披露的关键经营事实，再以明确假设评估未来；未来增长、ROE或估值倍数不是能从公告取得的确定事实。"
-    "核心缺口gap_type只可为missing_disclosure、unreadable_source、source_conflict，说明具体历史事实或来源问题与获取动作。"
+    "核心缺口gap_type只可为missing_disclosure、unreadable_source、source_conflict、input_omission，说明具体历史事实或来源问题与获取动作。"
+    "source_coverage只表示候选原文可见性，不代表答案充分或推断已核验；omitted_by_input_budget须记input_omission，不能说公司未披露。not_found_in_captured_text仅说明当前捕获正文未找到，不证明所有披露均无此信息。未来经营假设不是待补的历史事实。"
     "关键事实足够时完成有条件估值并选建仓或等待价格；证据表明投资论点不成立时可用rejected/reject、零目标仓位，entry_condition写重新研究的具体触发。"
     "放弃须引用可用公司披露、thesis_change为invalidated且不带核心缺口；缺资料或采集失败仍为pending，不能冒充负面投资结论。已有持仓不得用reject代替持有、减仓或退出审核。"
     "核心业务/财务/估值缺口需明确what_to_fetch及重新评估条件，不能靠含糊HOLD无限拖延。"

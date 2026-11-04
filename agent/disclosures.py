@@ -16,7 +16,7 @@ from config import DATA_DIR, MARKETS, ROOT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
-VERSION = "controlled-pdf-capture-v8"
+VERSION = "controlled-pdf-capture-v9"
 TEXT_PROTOCOL = "pymupdf-sorted-v1"
 HOME = DATA_DIR / "disclosures"
 MAX_PDF = 80_000_000
@@ -216,32 +216,29 @@ def select_passages(document, extracted, tasks=()):
                 "page_excerpt_complete": start == 0 and end == len(page["text"]), "report_period": None,
                 "task_matches": [term for term in requested if term in excerpt]})
     selected.extend(select_task_passages(document, extracted, tasks))
+    from agent.research_retrieval import question_material
+    question = question_material(document, extracted, tasks)
+    if question:
+        selected.append({**question, 'capture_protocol': VERSION})
     return selected
 
 
 def select_task_passages(document, extracted, tasks):
     from agent.research_tasks import PROTOCOL, FINAL, query_terms
     selected = []
-    for rank, task in enumerate(tasks):
+    for rank, task in enumerate(tasks[:4]):
         if task.get('task_protocol') != PROTOCOL or task['status'] in FINAL:
             continue
-        terms = query_terms(task)
-        candidates = []
-        for page in extracted['pages']:
-            text = page['text']
-            if '目录' in text[:180]:
-                continue
-            hits = [term for term in terms if term in text]
-            if hits:
-                candidates.append((sum(min(len(term), 12) for term in hits), -page['pdf_page'], page, hits))
+        from agent.research_retrieval import find_candidates
+        candidates = find_candidates(document, extracted, [task], only_tasks=True)
         if not candidates:
             continue
-        score, _, page, hits = max(candidates, key=lambda row: row[:2])
+        candidate = candidates[0]
+        page = next(p for p in extracted['pages'] if p['pdf_page'] == candidate['pdf_page'])
         text = page['text']
-        best = max(hits, key=len)
-        start = max(0, text.find(best)-180)
-        start = text.rfind('\n', 0, start)+1
-        end = min(len(text), start+800)
+        start, end = candidate['start'], candidate['end']
+        hits = [t for t in query_terms(task) if t in text[start:end]]
+        score = sum(min(len(t), 12) for t in hits)
         category = 'business' if task['category'] in {'business', 'industry'} else 'financials'
         excerpt = text[start:end]
         selected.append({**document, 'categories': [category], 'excerpt': excerpt,
@@ -336,6 +333,9 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
                         passages.append({**financial, 'capture_protocol': VERSION})
                     if not passages:
                         raise ValueError('没有可用业务或财务选段，不能把下载成功记作研究资料齐备')
+                    from agent.research_retrieval import validate_windows
+                    for passage in passages:
+                        validate_windows(passage, extracted)
                     stored = [book.add_material({**passage, "pdf_sha256": digest, "first_downloaded_at": capture["first_downloaded_at"]}) for passage in passages]
                     captured.extend(stored)
                     identifiers = [row['material_id'] for row in stored]
