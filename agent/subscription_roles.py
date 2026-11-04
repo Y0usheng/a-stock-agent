@@ -73,6 +73,25 @@ def _pick(row: dict, keys: tuple, text_limit: int = 300) -> dict:
 
 
 def current_materials(rows):
+    questions = [r for r in rows if r.get('question_protocol')]
+    if questions:
+        # Whole question packs replace keyword-rich but irrelevant introductions.
+        selected = []
+        for kind in ('annual', 'interim'):
+            group = sorted((r for r in questions if r.get('document_type') == kind),
+                           key=lambda r: (str(r.get('published_at', '')), str(r.get('first_seen_at', ''))), reverse=True)
+            if group:
+                selected.append(group[0])
+        numeric = sorted((r for r in rows if r.get('numeric_facts')),
+                         key=lambda r: str(r.get('published_at', '')), reverse=True)
+        for kind in ('annual', 'interim'):
+            row = next((r for r in numeric if r.get('document_type') == kind), None)
+            if row:
+                selected.append(row)
+        from agent.research_tasks import task_materials
+        covered = {key for r in selected for key in r.get('task_ids', [])}
+        selected.extend(r for r in task_materials(rows, 1) if set(r.get('task_ids', [])) - covered)
+        return selected
     selected = []
     for category in ("business", "financials"):
         candidates = sorted((row for row in rows if category in row["categories"]),
@@ -100,6 +119,9 @@ def current_materials(rows):
 
 def material_excerpt(row, limit):
     """Select a contiguous source window, never a generated business summary."""
+    if row.get('question_protocol'):
+        from agent.research_retrieval import compact_question_excerpt
+        return compact_question_excerpt(row, limit)
     if row.get('numeric_facts'):
         from agent.financial_inputs import render_facts
         return render_facts(row['numeric_facts'], limit)
@@ -178,8 +200,13 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
                         text_limit = 650 // sum(r['categories']==['business'] for r in chosen)
                     if any(r.get('numeric_facts') for r in chosen) and any(r.get('task_ids') for r in chosen) and not row.get('numeric_facts'):
                         text_limit = 650 // max(1, sum(not r.get('numeric_facts') for r in chosen))
+                if row.get('question_protocol'):
+                    text_limit = min(len(row['excerpt']), 650)  # Retain whole windows within the hard presentation bound.
                 item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
                 item["excerpt"] = material_excerpt(row, text_limit)
+                if row.get('question_protocol'):
+                    for key in ('question_protocol', 'question_candidates', 'question_visible', 'question_unmatched'):
+                        item[key] = deepcopy(row.get(key, []))
                 if row.get('numeric_facts'):
                     from agent.financial_inputs import fact_line
                     item['numeric_facts'] = [deepcopy(f) for f in row['numeric_facts']
@@ -201,6 +228,8 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
         result.update(research_materials=selected, price_history=histories,
             previous_cases=deepcopy(research.get("previous_cases", [])), research_tasks=deepcopy(research.get("tasks", [])),
             auxiliary_gaps=deepcopy(research.get("auxiliary_gaps", [])), investment_policy=deepcopy(research.get("policy", {})))
+        from agent.research_retrieval import coverage
+        result['retrieval_coverage'] = coverage(research.get('materials', []), selected)
         from agent.opportunities import compact_context
         result["opportunity_context"] = compact_context(context.get("news", {}).get("theme_discovery"), context["symbols"])
         if context.get("learning_context"):
@@ -254,7 +283,11 @@ class SubscriptionRoles:
         self.raw_outputs = {}
 
     def audit(self):
+        from agent.research_retrieval import eligible_coverage
+        delivered = eligible_coverage(self.context.get('retrieval_coverage', []),
+            {r['payload'].get('material_id') for r in self.catalog['records'] if r['kind']=='company_document' and r['eligible']})
         return {"catalog": deepcopy(self.catalog), "analyst_claims": deepcopy(self.claims_by_role),
+                'source_delivery': delivered,
                 "validation": "id_content_scope_symbol_and_publication_cutoff",
                 "semantic_support_verified": False,
                 **({'wire_reference_protocol':REFERENCE_PROTOCOL, 'wire_reference_slots':{v:k for k,v in self.slots.items()}} if self.slots else {}),
@@ -306,6 +339,9 @@ class SubscriptionRoles:
         if self.long_term:
             payload.update(previous_cases=context["previous_cases"], research_tasks=context["research_tasks"],
                            auxiliary_gaps=context["auxiliary_gaps"], investment_policy=context["investment_policy"])
+            from agent.research_retrieval import coverage_summary, eligible_coverage
+            payload['source_coverage'] = coverage_summary(eligible_coverage(context.get('retrieval_coverage', []),
+                {r['payload'].get('material_id') for r in records if r['kind']=='company_document' and r['eligible']}))
             from agent.financial_inputs import references
             eligible_materials = [record['payload'] for record in self.catalog['records']
                                   if record['kind']=='company_document' and record['eligible']]
@@ -374,7 +410,7 @@ class SubscriptionRoles:
                         # Host audit keeps the full catalog. Spend presentation
                         # space on source passages rather than repeated flags.
                         record["data"] = {key: deepcopy(value) for key, value in record["data"].items()
-                                          if key in {"symbol", "categories", "published_at", "locator", "excerpt", "unit_context_present", "document_type", "excerpt_truncated"}}
+                                          if key in {"symbol", "categories", "published_at", "locator", "report_period", "excerpt", "unit_context_present", "document_type", "excerpt_truncated"}}
                         for key in ("source_tier", "content_scope", "data_quality"):
                             record.pop(key, None)
         prompt = self.manager_prompt if name == "investment-manager" else self.definitions[name].prompt
