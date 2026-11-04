@@ -7,6 +7,7 @@ import unittest
 
 from agent.research_retrieval import (question_material, compact_question_excerpt, coverage, coverage_summary)
 from agent.subscription_roles import export_paper_context, current_materials, SubscriptionRoles
+from agent.investment import select_materials
 from evals.experiments import canonical_hash
 from evals.research_sources import validate_windows, fact_results, evaluate, assertion_prechecks, present_sources
 from tests.test_investment import example
@@ -152,6 +153,17 @@ class ResearchSourceTests(unittest.TestCase):
                 [('old','2025-03-01','annual'),('annual','2026-03-01','annual'),('latest','2026-10-31','interim')]]
         rows.append({'material_id':'speech','categories':['business'],'published_at':'2026-11-01'})
         self.assertEqual({r['material_id'] for r in current_materials(rows)}, {'annual','latest'})
+
+    def test_financial_baselines_do_not_depend_on_source_insertion_order(self):
+        from itertools import permutations
+        rows = [{'material_id': key, 'categories':['financials'], 'document_type':kind,
+                 'published_at':day, 'numeric_facts':[{'metric':'eps'}] if numeric else [], 'unit_context_present':True}
+                for key,kind,day,numeric in [('annual','annual','2026-03-28',True),
+                    ('latest','interim','2026-10-31',True),('old','interim','2026-08-30',True),
+                    ('raw','interim','2026-10-31',False)]]
+        for order in permutations(rows):
+            selected = select_materials(list(order), 2)
+            self.assertEqual({r['material_id'] for r in selected}, {'annual','latest'})
 
 
 if __name__ == '__main__':

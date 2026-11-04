@@ -67,7 +67,8 @@ def select_materials(rows, limit=4):
         if category == "financials":
             usable = [item for item in candidates if item.get("unit_context_present") is not False]
             candidates = usable or candidates
-            candidates.sort(key=lambda item: not bool(item.get('numeric_facts')))
+            candidates.sort(key=lambda item: (str(item.get('published_at', '')), bool(item.get('numeric_facts')),
+                                               str(item.get('first_seen_at', ''))), reverse=True)
         row = next((item for item in candidates if category == "financials" and item.get("document_type") == "annual"), None) or next(iter(candidates), None)
         if row is not None and row not in selected:
             selected.append(row)
