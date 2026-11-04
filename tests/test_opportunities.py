@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import unittest
-from jsonschema import ValidationError
+from jsonschema import ValidationError, validate
 from unittest.mock import patch
 
 from agent.opportunities import (OpportunityBook, compact_context, discover, normalize_event,
@@ -123,6 +123,58 @@ class OpportunityTests(unittest.TestCase):
         bad = judgment(leads); bad['themes'] = []
         with self.assertRaises(ValidationError):
             validate_review(bad, leads)
+
+    def test_native_citation_schema_enforces_used_quote_boundaries(self):
+        source = feed([event(title='储能合同测试', excerpt=(
+            '测试公开片段：储能合同总金额36.4亿元，订单执行期限、实际收入与现金流仍需核实。' + '待核验' * 30))])
+        leads, _ = route_feed(source)
+        lead = leads[0]
+        packet = {'themes': [{**lead, 'events': [{**lead['events'][0], 'ref': 'E1'}]}]}
+        schema = wire_review_schema(leads)
+        wire = asyncio.run(FakeClient(judgment(leads, 'monitor')).complete(
+            json.dumps(packet, ensure_ascii=False), schema, role='fixture'))
+        annotation = wire[lead['theme_id']]['evidence']['E1']
+        for stance in ('support', 'contradict'):
+            annotation['stance'] = stance
+            # This exact 11-character amount fragment caused the live failure.
+            for quote in ('', '合', '合同总金额36.4亿元', lead['events'][0]['excerpt'][:81]):
+                with self.subTest(stance=stance, invalid_chars=len(quote)):
+                    annotation['quote'] = quote
+                    with self.assertRaises(ValidationError):
+                        validate(wire, schema)
+            for length in (12, 80):
+                with self.subTest(stance=stance, valid_chars=length):
+                    annotation['quote'] = lead['events'][0]['excerpt'][:length]
+                    validate(wire, schema)
+                    restored = normalize_wire_review(wire, leads)
+                    self.assertEqual(restored['themes'][0]['source_observations'][0]['quote'], annotation['quote'])
+        annotation.update(stance='unused', quote='')
+        validate(wire, schema)
+        self.assertEqual(normalize_wire_review(wire, leads)['themes'][0]['source_observations'], [])
+        annotation['quote'] = lead['events'][0]['excerpt'][:12]
+        with self.assertRaises(ValidationError):
+            validate(wire, schema)
+
+    def test_short_quote_failure_is_preserved_without_padding_or_retry(self):
+        source = feed([event(title='储能合同测试', excerpt=(
+            '测试公开片段：储能合同总金额36.4亿元，订单执行期限、实际收入与现金流仍需核实。'))])
+        leads, _ = route_feed(source)
+        response = judgment(leads)
+        quote = '合同总金额36.4亿元'
+        response['themes'][0]['source_observations'][0]['quote'] = quote
+        client = FakeClient(response)
+        with subscription_workspace() as root:
+            book = OpportunityBook(root / 'book.db')
+            result = asyncio.run(discover(source, book=book, client=client))
+            receipt = json.loads(next((root / 'review_receipts').glob('*.json')).read_text(encoding='utf-8'))
+            self.assertEqual(book._read('SELECT payload FROM reviews'), [])
+            self.assertEqual(book.latest()['review_error'], result['review_error'])
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.settings['request_limit'], 1)
+        self.assertTrue(result['review_error'])
+        self.assertEqual(result['selected_symbols'], [])
+        self.assertEqual(result['orders_submitted'], 0)
+        self.assertEqual(receipt['wire_output']['electrification']['evidence']['E1']['quote'], quote)
 
     def run_discovery(self, source, **kwargs):
         with subscription_workspace() as root:
