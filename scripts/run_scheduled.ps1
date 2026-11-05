@@ -27,9 +27,14 @@ try {
     & $pythonPath @runArguments *> $runLogPath
     $runExitCode = $LASTEXITCODE
     $analysisExitCode = $runExitCode
+    $comparisonExitCode = 0
     if ($Publish) {
         & $pythonPath scripts/refresh_trading_view.py --provider sina >> $runLogPath 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Warning '真实股价刷新失败，将保留旧缓存并在报告中标明行情日期。' }
+        $priceExitCode = $LASTEXITCODE
+        if ($priceExitCode -ne 0) { Write-Warning '真实股价刷新失败，将保留旧缓存并在报告中标明行情日期。' }
+        & $pythonPath scripts/refresh_portfolio_comparison.py >> $runLogPath 2>&1
+        $comparisonExitCode = $LASTEXITCODE
+        if ($comparisonExitCode -ne 0) { Write-Warning '组合基准刷新未完成；保留原记录，未重跑模型研究。' }
         $publicationDay = & $pythonPath -c "from datetime import datetime;from servers.data_quality import market_zone;print(datetime.now(market_zone('cn')).date().isoformat())"
         & $pythonPath scripts/publish_reports.py export --date $publicationDay >> $runLogPath 2>&1
         if ($LASTEXITCODE -eq 0) {
@@ -37,6 +42,8 @@ try {
         }
         $runExitCode = $LASTEXITCODE
         if ($analysisExitCode -ne 0) { $runExitCode = $analysisExitCode }
+        elseif ($comparisonExitCode -ne 0 -and $runExitCode -eq 0) { $runExitCode = $comparisonExitCode }
+        elseif ($priceExitCode -ne 0 -and $runExitCode -eq 0) { $runExitCode = $priceExitCode }
     }
 } finally { Pop-Location }
 Write-Output "运行日志: $runLogPath"

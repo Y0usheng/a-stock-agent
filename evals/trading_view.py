@@ -225,6 +225,13 @@ def load_view(cache=PRICE_CACHE, log_dir=LOG_DIR, db=None):
         result["learning"] = public_summary(logs[-1]["learning"])
     from agent.research_quality import QualityBook
     QualityBook().annotate(result, logs)
+    from agent.trading_clock import now
+    from evals.portfolio_comparison import ComparisonBook, build_comparison
+    try:
+        result['comparison'] = build_comparison(ComparisonBook().context(now().isoformat()), result['as_of_date'],
+                                                result['portfolio']['journal_reconciled'])
+    except (ValueError, OSError, KeyError):
+        result['comparison'] = {'status':'record_invalid','message':'组合基准记录未通过核对，暂不显示相对表现。','series':[]}
     return result
 
 

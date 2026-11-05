@@ -120,6 +120,7 @@ A股账本当前配置为100万元初始模拟现金、一手100股、T+1、单�
 - 真实收盘价、MA20/MA60、成交量和实际模拟买卖标记。
 - 持仓与持续观察名单并排展示；每家公司保留各自上次判断时间、核心缺口、实际仓位和计划仓位，点击切换走势。无研究记录的公司明确标为尚未研究，不产生预测或收益。
 - 现金、持仓、成交费用、浮盈亏与扣费后的组合净收益。
+- 事前登记起点后的组合、沪深300全收益与现金本金对照；空仓机会差单列，缺数或权益口径不足时暂停严格评分。见[组合基准口径](docs/PORTFOLIO_COMPARISON.md)。
 - 新协议的信息截止、决策完成、未来执行日期、AI排定状态及已到期学习样本数。
 - 入选后股票的独立价格观察；从严格晚于入选日的首个已收盘价格开始，至少两个后续价格才能计算涨跌。
 
@@ -161,6 +162,8 @@ codex login
 .venv\Scripts\python scripts/company_research.py tasks
 # 更新真实股价及HTML；首次可用--symbols指定研究对象
 .venv\Scripts\python scripts/refresh_trading_view.py --provider sina
+# 登记组合基准并刷新官方全收益指数；零模型调用、零订单
+.venv\Scripts\python scripts/refresh_portfolio_comparison.py
 # 导出某日公开报告并触发GitHub Pages部署
 .venv\Scripts\python scripts/publish_reports.py export --date 2026-10-29
 .venv\Scripts\python scripts/publish_reports.py publish
