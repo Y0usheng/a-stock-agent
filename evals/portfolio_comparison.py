@@ -82,7 +82,6 @@ class ComparisonBook:
 
     def observe(self, policy, index_rows, curve, ledger, sessions, recorded_at, *, initial=None):
         """Append matched closes; never replace a past observation with revised data."""
-        from evals.trading_view import _journal
         end = event_time(recorded_at, 'cn')
         path = self.root/'observations.json'
         stored = _read(path) if path.exists() else {'policy_id': policy['fingerprint'], 'points': []}
@@ -101,14 +100,20 @@ class ComparisonBook:
             if day not in prices:
                 raise ValueError('基准缺少对应交易日，不跳过后计算超额收益')
             day_trades = [r for r in ledger['trades'] if r['trade_date'] <= day]
-            cash, held, _ = _journal({**ledger, 'trades':day_trades}, initial or MARKETS['cn']['initial_cash'])
+            from agent.corporate_actions import replay
+            daily_ledger={**ledger,'trades':day_trades,'as_of_date':day}
+            state=replay(daily_ledger,initial or MARKETS['cn']['initial_cash'],day)
+            cash, held = state['cash'],bool(state['positions'] or state['rights'])
             if not math.isfinite(float(p['total'])) or p['total'] <= 0 or not 0 <= cash <= p['total'] + .02:
                 raise ValueError('账户估值或现金比例无效')
+            journal=[{k:r.get(k) for k in ('symbol','action','shares','price','fee','trade_date')} for r in day_trades]
+            if state['recognized_events']:journal += state['recognized_events']
             body = {'date':day, 'portfolio_total':float(p['total']), 'index_close':prices[day],
                     'cash_ratio_pct':round(cash/float(p['total'])*100, 6), 'all_cash':not held,
-                    'journal_hash':canonical_hash([{k:r.get(k) for k in ('symbol','action','shares','price','fee','trade_date')} for r in day_trades])}
+                    'journal_hash':canonical_hash(journal),
+                    'equity_accounting_complete':bool(p.get('equity_accounting_complete')) if held else False}
             if day in points:
-                old = {k:points[day][k] for k in body}
+                old = {k:points[day].get(k,False) for k in body}
                 if old != body:
                     raise ValueError('历史价格或账本估值发生修订，已冻结对照，需核对原记录')
             else:
@@ -166,6 +171,7 @@ def build_comparison(context, price_date, journal_ok=True):
         return result
     first = points[0]
     all_cash = all(p['all_cash'] for p in points)
+    complete=all(p['all_cash'] or p.get('equity_accounting_complete',False) for p in points)
     for p in points:
         result['series'].append({'date':p['date'], 'portfolio_return_pct':round((p['portfolio_total']/first['portfolio_total']-1)*100,6),
             'benchmark_return_pct':round((p['index_close']/first['index_close']-1)*100,6), 'cash_return_pct':0})
@@ -173,13 +179,13 @@ def build_comparison(context, price_date, journal_ok=True):
     result.update(observations=len(points), comparison_start=first['date'], comparison_end=points[-1]['date'],
                   reference_assets=first['portfolio_total'], portfolio_return_pct=last['portfolio_return_pct'],
                   benchmark_return_pct=last['benchmark_return_pct'], cash_ratio_pct=round(sum(p['cash_ratio_pct'] for p in points)/len(points),4),
-                  all_cash=all_cash, status='ready' if all_cash else 'limited_accounting',
-                  message='同一起点的真实账本变化、市场全收益与现金本金对照。' if all_cash else
+                  all_cash=all_cash, status='ready' if complete else 'limited_accounting',
+                  message='同一起点的实际模拟账本、市场全收益与现金本金对照；账户股息税前，已扣成交费用，指数不计费用。' if complete else
                   '区间存在股票持仓；账本尚未计入完整分红/拆股权益，曲线供参考，暂不作严格全收益绩效评分。')
     if points[-1]['date'] != price_date or refresh.get('state') != 'ready':
         result.update(status='stale', message='对照尚未覆盖当前行情日，暂不计算当前相对表现。')
     if result['status']=='ready':
         gap = last['portfolio_return_pct']-last['benchmark_return_pct']
-        result.update(return_gap_pp=round(gap,6), relative_pnl=round(first['portfolio_total']*gap/100,2),
-                      cash_opportunity_amount=round(first['portfolio_total']*last['benchmark_return_pct']/100,2))
+        result.update(return_gap_pp=round(gap,6), relative_pnl=round(first['portfolio_total']*gap/100,2))
+        if all_cash:result['cash_opportunity_amount']=round(first['portfolio_total']*last['benchmark_return_pct']/100,2)
     return result

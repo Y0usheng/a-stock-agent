@@ -107,6 +107,17 @@ class PortfolioComparisonTests(unittest.TestCase):
             self.assertNotIn('return_gap_pp',result)
             self.assertFalse(result['all_cash'])
 
+    def test_verified_unadjusted_equity_window_gets_relative_score_without_cash_opportunity_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book,policy=self.book(Path(tmp));ledger={'cash':900.,'positions':[{'symbol':'300750','shares':10}],
+                'trades':[{'symbol':'300750','action':'BUY','shares':10,'price':10.,'fee':0.,'trade_date':DAYS[0]}]}
+            curve=[{'date':DAYS[0],'total':1000.,'equity_accounting_complete':True},
+                   {'date':DAYS[1],'total':1100.,'equity_accounting_complete':True}]
+            book.observe(policy,rows(),curve,ledger,DAYS,STAMP,initial=1000)
+            book.status(STAMP,'ready',DAYS[1]);result=build_comparison(book.context(STAMP),DAYS[1])
+            self.assertEqual(result['status'],'ready');self.assertEqual(result['return_gap_pp'],0)
+            self.assertNotIn('cash_opportunity_amount',result)
+
     def test_historical_cutoff_hides_later_observations_and_refresh_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
             book,policy=self.book(Path(tmp))

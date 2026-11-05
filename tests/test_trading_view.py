@@ -14,7 +14,7 @@ def fixture():
     rows = [{"date": day, "open": price, "high": price + 1, "low": price - 1, "close": price, "volume": 10000}
             for day, price in [("2026-10-20", 10), ("2026-10-21", 11), ("2026-10-22", 12), ("2026-10-23", 11), ("2026-10-26", 12)]]
     histories = {"300750": rows}
-    payload = {"market": "cn", "data_quality": "live_prices", "source": "unit test fixture", "price_basis": "qfq",
+    payload = {"market": "cn", "data_quality": "live_prices", "source": "unit test fixture", "price_basis": "unadjusted",
                "histories": histories, "fingerprint": canonical_hash(histories), "fetched_at": "2026-10-26T16:00:00+08:00"}
     ledger = {"cash": 1000., "positions": [], "trades": []}
     log = {"market": "cn", "as_of_date": "2026-10-26", "execution_mode": "shadow", "offline": False,

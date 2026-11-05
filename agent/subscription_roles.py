@@ -28,7 +28,7 @@ EVIDENCE_INSTRUCTIONS = (
 AFTER_CLOSE_ROLE_PROMPTS = {
     "technical-analyst": "你是技术分析师，只评估冻结价格、指标和已标明采样范围的价格历史；技术面不能替代业务和估值。",
     "fundamental-analyst": "你是基本面分析师，结合原始披露与新闻，评估业务、盈利现金质量、竞争风险和估值缺口；正负事实综合为每股一条结论。",
-    "risk-manager": "你是独立风险经理，逐股审核送审计划：核对来源、估值及核心缺口、现金、100股手数、T+1和单股30%上限。不得替经理改价或增加股数；不合规则拒绝或缩量，HOLD不代表允许未来买入。",
+    "risk-manager": "你是独立风险经理，逐股审核送审计划：核对来源、估值及核心缺口、可用现金、买入100股手数、卖出零股仅一次清仓、T+1、送转上市日和含未上市权益的单股30%上限。应收股息不能用于买入。不得替经理改价或增加股数；不合规则拒绝或缩量，HOLD不代表允许未来买入。",
 }
 AFTER_CLOSE_EVIDENCE_INSTRUCTIONS = (
     "只使用本轮可用证据ID；supporting_ids与contradicting_ids只能引用同股票、同角色允许的ID。"
@@ -160,7 +160,10 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
     if (account.get("market") != market or account.get("currency") != MARKETS[market]["currency"]
             or account.get("initial_cash") != MARKETS[market]["initial_cash"]):
         raise ValueError("订阅输入仅支持本项目生成的虚拟模拟账本")
-    paper = _pick(account, ("cash", "total_assets", "initial_cash"))
+    paper = _pick(account, ("cash", "total_assets", "initial_cash",'cash_receivable'))
+    if account.get('corporate_rights'):
+        paper['corporate_rights']=[_pick(r,('symbol','cash_receivable','bonus_shares','pay_date','listing_date')) for r in account['corporate_rights']]
+        paper['equity_basis']='股息税前；应收现金不可用于买入，未上市股份不可卖出'
     paper["kind"] = "local_virtual_paper_ledger"
     paper["positions"] = [_pick(row, ("symbol", "shares", "avg_cost", "last_buy_date"))
                           for row in account.get("positions", [])]

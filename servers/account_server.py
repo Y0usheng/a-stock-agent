@@ -65,6 +65,8 @@ def _db():
         PRIMARY KEY(snapshot_date, run_id));
     """)
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
+    if 'rights_json' not in {r['name'] for r in conn.execute('PRAGMA table_info(valuation_snapshots)')}:
+        conn.execute("ALTER TABLE valuation_snapshots ADD COLUMN rights_json TEXT NOT NULL DEFAULT '[]'")
     if "run_id" not in columns:
         conn.execute("ALTER TABLE trades ADD COLUMN run_id TEXT")
     if "order_id" not in columns:
@@ -90,6 +92,9 @@ def _cash(conn) -> float:
 
 
 def _set_cash(conn, v: float):
+    if MARKET=='cn':
+        from agent.corporate_actions import cents
+        v=float(cents(v))
     conn.execute("UPDATE meta SET value=? WHERE key='cash'", (v,))
 
 
@@ -224,7 +229,29 @@ def _estimated_total_assets(conn, cash: float,
         if _price_error(px):
             px = row["avg_cost"]
         market_value += row["shares"] * float(px)
-    return cash + market_value
+    from agent.corporate_actions import receivable_value
+    return cash + market_value + receivable_value(_corporate_state(conn),prices)
+
+
+def _corporate_state(conn):
+    from agent.corporate_actions import read_actions,replay
+    tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    prior=conn.execute('SELECT through_date FROM corporate_settlements ORDER BY id DESC LIMIT 1').fetchone() if 'corporate_settlements' in tables else None
+    trades=[dict(r) for r in conn.execute('SELECT * FROM trades ORDER BY trade_date,id')]
+    if not prior:return {'rights':[],'cash_receivable':0.,'dividend_income':0.,'positions':[]}
+    through=max([prior[0]]+[r['trade_date'] for r in trades])
+    return replay({'trades':trades,'corporate_actions':read_actions(conn)},INITIAL_CASH,through)
+
+
+def _corporate_error(conn,symbol,day):
+    tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'corporate_settlements' not in tables:return None  # Legacy accounts migrate at the host entry.
+    latest=conn.execute('SELECT through_date,coverage FROM corporate_settlements ORDER BY id DESC LIMIT 1').fetchone()
+    refresh=conn.execute('SELECT state FROM corporate_refreshes ORDER BY id DESC LIMIT 1').fetchone() if 'corporate_refreshes' in tables else None
+    coverage=json.loads(latest['coverage']).get(symbol,{}) if latest else {}
+    if not latest or latest['through_date']<day or coverage.get('through_date','')<day or (refresh and refresh[0]!='ready'):
+        return '交易日前的权益公告核验未完成，拒绝新增成交'
+    return None
 
 
 @mcp.tool()
@@ -233,6 +260,7 @@ def get_account(current_prices: dict[str, float] | None = None) -> dict:
     可选传入 current_prices({symbol: 最新价})以计算市值和浮动盈亏"""
     conn = _db()
     cash = _cash(conn)
+    state=_corporate_state(conn)
     positions, mv = [], 0.0
     for r in conn.execute("SELECT * FROM positions WHERE shares>0"):
         p = dict(r)
@@ -242,10 +270,17 @@ def get_account(current_prices: dict[str, float] | None = None) -> dict:
             p["pnl_pct"] = round((px / r["avg_cost"] - 1) * 100, 2)
             mv += p["market_value"]
         positions.append(p)
+    from agent.corporate_actions import receivable_value
+    from evals.experiments import canonical_hash
+    complete=all((current_prices or {}).get(p['symbol']) for p in positions)
+    try:receivables=receivable_value(state,current_prices or {})
+    except ValueError:receivables=None;complete=False
     conn.close()
     return {"market": MARKET, "currency": M["currency"],
             "cash": round(cash, 2), "positions": positions,
-            "total_assets": round(cash + mv, 2) if current_prices else None,
+            'cash_receivable':state['cash_receivable'],'corporate_rights':state['rights'],
+            'corporate_rights_hash':canonical_hash(state['rights']),
+            "total_assets": round(cash + mv + receivables, 2) if current_prices and complete else None,
             "initial_cash": INITIAL_CASH}
 
 
@@ -284,6 +319,8 @@ def buy(symbol: str, name: str, shares: int, price: float, reason: str,
                 "price": existing["price"], "fee": existing["fee"],
                 "slippage_cost": existing["slippage_cost"] or 0,
                 "cash_after": round(cash, 2)}
+    if error:=_corporate_error(conn,symbol,trade_date):
+        conn.close();return {'ok':False,'error':error}
     amount = shares * price
     fee = _fee(amount, is_sell=False)
     cash = _cash(conn)
@@ -294,9 +331,12 @@ def buy(symbol: str, name: str, shares: int, price: float, reason: str,
     held_cost = (row["shares"] * row["avg_cost"]) if row else 0.0
     prices = dict(current_prices or {})
     prices[symbol] = market_price
-    total_est = _estimated_total_assets(conn, cash, prices)
+    try:total_est = _estimated_total_assets(conn, cash, prices)
+    except ValueError:
+        conn.close();return {'ok':False,'error':'应收送转权益缺少真实估值价，拒绝新增买入'}
     held_shares = row["shares"] if row else 0
-    position_after = (held_shares + shares) * market_price
+    pending_shares=sum(r['bonus_shares'] for r in _corporate_state(conn)['rights'] if r['symbol']==symbol)
+    position_after = (held_shares + pending_shares + shares) * market_price
     if position_after > total_est * MAX_POSITION_PCT:
         conn.close()
         return {"ok": False, "error": f"超过单股最大仓位 {MAX_POSITION_PCT:.0%},买入后市值 {position_after:.0f},总资产估算 {total_est:.0f}"}
@@ -327,8 +367,8 @@ def sell(symbol: str, shares: int, price: float, reason: str,
     """卖出股票。A股遵守 T+1(当日买入不可当日卖出),美股无此限制。
     reason 记录卖出理由供复盘"""
     symbol = symbol.strip().upper()
-    if error := _shares_error(shares):
-        return {"ok": False, "error": error}
+    if isinstance(shares,bool) or not isinstance(shares,int) or shares<=0:
+        return {'ok':False,'error':'卖出股数必须为正整数'}
     if error := _price_error(price):
         return {"ok": False, "error": error}
     if error := _liquidity_error(shares, daily_volume):
@@ -354,6 +394,10 @@ def sell(symbol: str, shares: int, price: float, reason: str,
     if not row or row["shares"] < shares:
         conn.close()
         return {"ok": False, "error": f"持仓不足:持有 {row['shares'] if row else 0} 股"}
+    if shares % LOT and shares!=row['shares']:
+        conn.close();return {'ok':False,'error':'零股卖出必须一次清仓，不能任意拆分零股'}
+    if error:=_corporate_error(conn,symbol,trade_date):
+        conn.close();return {'ok':False,'error':error}
     if M["t_plus_1"]:
         bought_today = conn.execute(
             "SELECT COALESCE(SUM(shares),0) FROM trades "
@@ -363,6 +407,9 @@ def sell(symbol: str, shares: int, price: float, reason: str,
             conn.close()
             return {"ok": False, "error": f"T+1限制:今日可卖 {sellable} 股,请求卖出 {shares} 股"}
     amount = shares * price
+    if MARKET=='cn':
+        from agent.corporate_actions import cents
+        amount=float(cents(amount))
     fee = _fee(amount, is_sell=True)
     remaining = row["shares"] - shares
     if remaining == 0:
@@ -370,7 +417,7 @@ def sell(symbol: str, shares: int, price: float, reason: str,
     else:
         conn.execute("UPDATE positions SET shares=? WHERE symbol=?", (remaining, symbol))
     _set_cash(conn, _cash(conn) + amount - fee)
-    pnl = (price - row["avg_cost"]) * shares - fee
+    pnl = amount - row["avg_cost"] * shares - fee
     slippage_cost = round((market_price - price) * shares, 2)
     conn.execute("INSERT INTO trades (trade_date,symbol,name,action,shares,price,fee,reason,run_id,order_id,market_price,slippage_cost,daily_volume) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (trade_date, symbol, row["name"], "SELL", shares, price, fee, reason,
@@ -411,17 +458,25 @@ def record_valuation_snapshot(run_id: str, snapshot_date: str,
         item["market_price"] = float(price)
         item["market_value"] = round(item["shares"] * float(price), 2)
     cash = _cash(conn)
-    total_assets = round(cash + sum(item["market_value"] for item in positions), 2)
+    from agent.corporate_actions import receivable_value
+    state=_corporate_state(conn)
+    try:rights_value=receivable_value(state,current_prices)
+    except ValueError:
+        conn.close();return {'ok':False,'error':'未上市权益缺少真实估值价，不登记不完整资产'}
+    total_assets = round(cash + sum(item["market_value"] for item in positions)+rights_value, 2)
     sources = sorted(set(str(source) for source in data_sources if source))
+    for right in state['rights']:
+        if right['bonus_shares']:normalized_prices[right['symbol']]=current_prices[right['symbol']]
     conn.execute(
-        "INSERT INTO valuation_snapshots(snapshot_date,run_id,cash,total_assets,positions_json,prices_json,data_sources_json) "
-        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(snapshot_date,run_id) DO UPDATE SET "
+        "INSERT INTO valuation_snapshots(snapshot_date,run_id,cash,total_assets,positions_json,prices_json,data_sources_json,rights_json) "
+        "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(snapshot_date,run_id) DO UPDATE SET "
         "cash=excluded.cash,total_assets=excluded.total_assets,positions_json=excluded.positions_json,"
-        "prices_json=excluded.prices_json,data_sources_json=excluded.data_sources_json,created_at=CURRENT_TIMESTAMP",
+        "prices_json=excluded.prices_json,data_sources_json=excluded.data_sources_json,rights_json=excluded.rights_json,created_at=CURRENT_TIMESTAMP",
         (snapshot_date, run_id, cash, total_assets,
          json.dumps(positions, ensure_ascii=False, separators=(",", ":")),
          json.dumps(normalized_prices, ensure_ascii=False, separators=(",", ":")),
-         json.dumps(sources, ensure_ascii=False, separators=(",", ":"))),
+         json.dumps(sources, ensure_ascii=False, separators=(",", ":")),
+         json.dumps(state['rights'],ensure_ascii=False,separators=(',',':'))),
     )
     conn.commit()
     conn.close()
@@ -439,7 +494,7 @@ def get_valuation_snapshots(limit: int = 200) -> list[dict]:
     )]
     conn.close()
     for row in rows:
-        for key in ("positions_json", "prices_json", "data_sources_json"):
+        for key in ("positions_json", "prices_json", "data_sources_json",'rights_json'):
             row[key.removesuffix("_json")] = json.loads(row.pop(key))
     return rows
 

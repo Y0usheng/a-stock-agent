@@ -69,7 +69,9 @@ def sanitize_view(view):
         result["timing"] = pick(view["timing"], "version price_as_of_date information_cutoff_at decision_at execution_session execution_at approval_deadline order_type max_price_deviation_pct fill_model")
     if "pending_orders" in view:
         result["pending_orders"] = [pick(row, "symbol action shares status execution_session approval_deadline information_cutoff_at state_recorded_at reference_price max_price_deviation_pct execution_policy") for row in view["pending_orders"]]
-    result["portfolio"] = pick(view.get("portfolio", {}), "initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count journal_reconciled")
+    result["portfolio"] = pick(view.get("portfolio", {}), "initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count journal_reconciled dividend_income cash_receivable")
+    if 'equity_accounting' in view:
+        result['equity_accounting']=pick(view['equity_accounting'],'version status valuation_price_basis dividend_tax_basis cash_receivable dividend_income pending_shares settled_through message')
     result["portfolio_curve"] = [pick(row, "date total cumulative_return_pct") for row in view.get("portfolio_curve", [])]
     if 'comparison' in view:
         row = view['comparison']
@@ -117,21 +119,14 @@ def ledger_as_of(ledger, day):
     current_cash, quantities, _ = _journal(ledger, initial)
     if abs(current_cash - ledger["cash"]) > .02 or quantities != {row["symbol"]: row["shares"] for row in ledger["positions"]}:
         raise ValueError("账本未对账，停止公开收益")
-    trades = [row for row in ledger["trades"] if row["trade_date"] <= day]
-    holdings = {}
-    for row in trades:
-        symbol, quantity = row["symbol"], row["shares"]
-        held = holdings.setdefault(symbol, {"symbol": symbol, "name": row.get("name", symbol), "shares": 0, "basis": 0., "last_buy_date": ""})
-        if row["action"] == "BUY":
-            held["basis"] += quantity * row["price"] + row["fee"]
-            held["shares"] += quantity
-            held["last_buy_date"] = row["trade_date"]
-        else:
-            held["basis"] -= held["basis"] / held["shares"] * quantity
-            held["shares"] -= quantity
-    cash, _, _ = _journal({"trades": trades}, initial)
-    positions = [{**pick(row, "symbol name shares last_buy_date"), "avg_cost": row["basis"] / row["shares"]} for row in holdings.values() if row["shares"]]
-    return {"cash": cash, "positions": positions, "trades": trades, "exists": ledger.get("exists", False)}
+    from agent.corporate_actions import replay
+    cutoff=market_close(day,'cn').replace(hour=23,minute=59,second=59)
+    snapshot={**ledger,'trades':[r for r in ledger['trades'] if r['trade_date']<=day], 'as_of_date':day}
+    snapshot['corporate_actions']=[r for r in ledger.get('corporate_actions',[]) if event_time(r['known_at'],'cn')<=cutoff]
+    for key in ('corporate_settlements','corporate_refreshes'):
+        snapshot[key]=[r for r in ledger.get(key,[]) if event_time(r['recorded_at'],'cn')<=cutoff]
+    state=replay(snapshot,initial,day)
+    return {**snapshot,'cash':state['cash'],'positions':state['positions']}
 
 
 def report_days(logs=None, book=None):
@@ -155,6 +150,12 @@ def make_report(day, *, cache=PRICE_CACHE, ledger=None, logs=None, book=None):
     payload["histories"] = {symbol: [row for row in rows if row["date"] <= day] for symbol, rows in payload["histories"].items()}
     payload["histories"] = {symbol: rows for symbol, rows in payload["histories"].items() if rows}
     payload["fingerprint"] = canonical_hash(payload["histories"])
+    if payload.get('valuation_histories'):
+        if canonical_hash(payload['valuation_histories'])!=payload.get('valuation_fingerprint'):
+            raise ValueError('未复权估值价格指纹不符')
+        payload['valuation_histories']={s:[r for r in rows if r['date']<=day] for s,rows in payload['valuation_histories'].items()}
+        payload['valuation_histories']={s:r for s,r in payload['valuation_histories'].items() if r}
+        payload['valuation_fingerprint']=canonical_hash(payload['valuation_histories'])
     logs = saved_logs() if logs is None else logs
     logs = [row for row in logs if not uses_synthetic_data(row) and (row.get("as_of_date") or row.get("date", "")) <= day]
     cutoff = market_close(day, "cn").replace(hour=23, minute=59, second=59)
@@ -229,8 +230,8 @@ def validate_report(report):
             raise ValueError("报告含未来分析或价格")
     datetime.fromisoformat(report["published_at"])
     numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence calibrated_confidence target_weight actual_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct mature_samples pending_samples attempt_count".split())
-    numeric.update('observations reference_assets portfolio_return_pct benchmark_return_pct cash_ratio_pct return_gap_pp relative_pnl cash_opportunity_amount cash_return_pct'.split())
-    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing", "learning", "comparison"}
+    numeric.update('observations reference_assets portfolio_return_pct benchmark_return_pct cash_ratio_pct return_gap_pp relative_pnl cash_opportunity_amount cash_return_pct dividend_income cash_receivable pending_shares'.split())
+    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing", "learning", "comparison",'equity_accounting'}
     string_arrays = {"warnings", "limitations", "selected_symbols", "risk_review_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols", "research_watchlist", "baseline_review_symbols", "deferred_research_symbols", "symbols"}
     def check(value, key="", depth=0):
         if depth > 12:
@@ -249,7 +250,7 @@ def validate_report(report):
                 check(child, "", depth + 1)
         elif isinstance(value, str) and len(value) > 3000:
             raise ValueError("公开文本超限")
-        if key in {"date", "trade_date", "last_buy_date", "as_of_date", "selected_on", "observation_start", "price_as_of", 'comparison_start', 'comparison_end', 'source_as_of_date'} and value and date.fromisoformat(value) > day:
+        if key in {"date", "trade_date", "last_buy_date", "as_of_date", "selected_on", "observation_start", "price_as_of", 'comparison_start', 'comparison_end', 'source_as_of_date','settled_through'} and value and date.fromisoformat(value) > day:
             raise ValueError("公开视图包含未来记录")
         if key in {'registered_at','source_checked_at'} and value and event_time(value,'cn').date() > day:
             raise ValueError('公开视图包含未来登记或检查记录')

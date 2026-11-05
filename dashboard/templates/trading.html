@@ -17,6 +17,8 @@
 <div class="card"><div class="muted">模拟持仓</div><div class="metric" id="positionCount"></div><div class="muted" id="tradeCount"></div></div>
 <div class="card"><div class="muted">手续费 / 滑点</div><div class="metric" id="fees"></div><div class="muted" id="slippage"></div></div>
 </div>
+<section id="equityPanel" class="card section" hidden><div class="heading"><h2>股息权益与估值口径</h2><span class="badge" id="equityState"></span></div>
+<p class="muted" id="equitySummary"></p><div class="note" id="equityNote"></div></section>
 <section id="comparisonPanel" class="card section" hidden><div class="heading"><h2>组合表现与空仓对照</h2><span class="badge" id="comparisonState"></span></div>
 <p class="muted" id="comparisonDates"></p><div class="grid section">
 <div><div class="muted">区间账本变化</div><div class="metric" id="comparisonPortfolio"></div></div>
@@ -50,6 +52,10 @@ const money=v=>v==null?'待估值':'¥'+number(v), signed=(v,suffix='')=>v==null
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const set=(id,value)=>$(id).textContent=value, tone=v=>v<0?'negative':'positive';let range=60;
 function beijingTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?'未知':time.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+'（北京时间）';}
+function drawEquity(){const e=data.equity_accounting;if(!e)return;$('equityPanel').hidden=false;
+ set('equityState',e.status==='ready'?'未复权估值 · 股息税前':'权益口径待核验');
+ set('equitySummary',`确认股息 ${money(e.dividend_income)} · 待到账股息 ${money(e.cash_receivable)} · 待上市送转 ${number(e.pending_shares||0,0)}股 · 已结算至 ${e.settled_through||'—'}`);
+ set('equityNote',(e.message||'')+' 应收现金不能用于买入；未上市送转股份不能卖出。配股、合并、反向拆股及碎股分配等未支持事项暂停自动处理。');}
 function drawComparison(){
  const c=data.comparison;if(!c||c.status==='not_registered')return;$('comparisonPanel').hidden=false;
  const labels={waiting_for_start:'等待登记后的首个收盘',waiting_for_portfolio_prices:'组合估值尚未齐备',ready:'事前登记对照',limited_accounting:'持仓权益口径待完善',stale:'对照数据尚未齐备',source_unavailable:'基准来源暂不可用',record_invalid:'记录待核对',account_unreconciled:'账本待对账'};
@@ -108,7 +114,7 @@ function draw(){const stock=data.stocks[Number($('stock').value)||0], rows=stock
  const markers=stock.trades.map(t=>({date:t.trade_date,value:t.price,action:t.action,label:`${t.trade_date} ${t.action} ${t.shares}股 · 成交¥${number(t.price,4)} · 费用¥${number(t.fee)}`}));
  const decision=stock.decision, analysisDate=stock.analysis_date||data.analysis_date;if(decision&&analysisDate&&stock.series.some(r=>r.date===analysisDate)){const row=stock.series.find(r=>r.date===analysisDate);markers.push({date:analysisDate,value:row.close,action:'HOLD',label:`分析建议 ${decision.action}，判断时间 ${stock.decision_at||analysisDate}，不是实际成交`});}
  plot('priceChart',[{color:'#70a3ff',points:rows.map(r=>({date:r.date,value:r.close}))},{color:'#edc37b',points:rows.map(r=>({date:r.date,value:r.ma20}))},{color:'#bda5ed',points:rows.map(r=>({date:r.date,value:r.ma60}))}],{markers,hover:true});
- const max=Math.max(...rows.map(r=>r.volume),1),w=(675/rows.length);$('volumeChart').innerHTML=rows.map((r,i)=>`<rect x="${65+i*w}" y="${70-r.volume/max*60}" width="${Math.max(1,w*.65)}" height="${r.volume/max*60}" fill="${r.close>=r.open?'#57d6a0':'#ff8992'}" opacity=".6"><title>${r.date} 成交量 ${number(r.volume,0)}股</title></rect>`).join('');set('priceMeta',`${rows[0].date} — ${last.date} · 前复权价格 · 拖动鼠标查看收盘价`);
+ const max=Math.max(...rows.map(r=>r.volume),1),w=(675/rows.length);$('volumeChart').innerHTML=rows.map((r,i)=>`<rect x="${65+i*w}" y="${70-r.volume/max*60}" width="${Math.max(1,w*.65)}" height="${r.volume/max*60}" fill="${r.close>=r.open?'#57d6a0':'#ff8992'}" opacity=".6"><title>${r.date} 成交量 ${number(r.volume,0)}股</title></rect>`).join('');set('priceMeta',`${rows[0].date} — ${last.date} · ${data.price_basis==='unadjusted'?'未复权价格':'前复权观察价格'} · 拖动鼠标查看收盘价`);
  const prediction=stock.prediction, direction={up:'偏多',down:'偏空',flat:'震荡'};
  const investment=stock.investment_case, intents={research_pending:'待补核心资料',wait_price:'研究已完成 · 等待合理价格',build:'计划分批建仓',hold:'投资论证延续 · 继续持有',reduce:'计划减仓',exit:'投资论证失效 · 计划退出',reject:'本轮放弃候选 · 等待新证据'};
  const tasks=(data.research_tasks||[]).filter(t=>t.symbol===stock.symbol&&t.status!=='migrated');
@@ -133,6 +139,6 @@ else{
  for(const n of [20,60,120,180]){const b=document.createElement('button');b.textContent=n+'日';b.className=n===range?'active':'';b.onclick=()=>{range=n;for(const x of $('ranges').children)x.className='';b.className='active';draw();};$('ranges').appendChild(b);}
  $('warnings').innerHTML=data.warnings.map(w=>`<div class="note warning">${esc(w)}</div>`).join('');
  $('trades').innerHTML=data.trades.length?'<table><thead><tr><th>日期</th><th>操作</th><th>股票</th><th>股数</th><th>成交价</th><th>费用</th><th>滑点成本</th></tr></thead><tbody>'+[...data.trades].reverse().map(t=>`<tr><td>${esc(t.trade_date)}</td><td class="${t.action==='BUY'?'positive':'negative'}">${esc(t.action)}</td><td>${esc(t.name)} ${esc(t.symbol)}</td><td>${t.shares}</td><td>¥${number(t.price,4)}</td><td>¥${number(t.fee)}</td><td>¥${number(t.slippage_cost||0)}</td></tr>`).join('')+'</tbody></table>':'<div class="empty">还没有模拟买入或卖出。下次实际模拟成交后，这里会出现交易记录，并在股价图上标记成交日期和价格。</div>';
- set('source',`来源：${data.source} · 缓存采集 ${data.fetched_at||'—'} · 页面刷新只读取本地数据`);$('limitations').innerHTML=data.limitations.map(s=>'<li>'+esc(s)+'</li>').join('');set('fingerprint','价格指纹 '+data.fingerprint);draw();drawComparison();
+ set('source',`来源：${data.source} · 缓存采集 ${data.fetched_at||'—'} · 页面刷新只读取本地数据`);$('limitations').innerHTML=data.limitations.map(s=>'<li>'+esc(s)+'</li>').join('');set('fingerprint','价格指纹 '+data.fingerprint);draw();drawComparison();drawEquity();
 }
 </script></body></html>
