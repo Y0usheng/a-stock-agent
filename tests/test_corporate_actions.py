@@ -3,6 +3,8 @@ from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -25,6 +27,24 @@ def ledger(trades=None,action=None):
     return {'trades':trades if trades is not None else [trade()], 'corporate_actions':[action or event()]}
 
 class CorporateReplayTests(unittest.TestCase):
+    def test_account_replay_does_not_load_pandas_in_a_fresh_process(self):
+        probe = """
+import json
+import sys
+from agent.corporate_actions import replay
+
+replay(json.loads(sys.argv[1]), 1000, '2026-10-22')
+assert 'pandas' not in sys.modules, 'Account replay imported the quote library'
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", probe, json.dumps(ledger())],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_record_date_ownership_and_delayed_payment_conserve_assets(self):
         l=ledger()
         before=replay(l,1000,'2026-10-21');ex=replay(l,1000,'2026-10-22');paid=replay(l,1000,'2026-10-26')

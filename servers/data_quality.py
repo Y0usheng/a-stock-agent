@@ -1,7 +1,12 @@
 """排除未收盘日线并验证各标的同一行情截面。"""
+from __future__ import annotations
+
 from datetime import datetime, time, date, timedelta
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
-import pandas as pd
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 
 def market_zone(market: str):
