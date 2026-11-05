@@ -2,6 +2,7 @@
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agent 模拟交易 · 股价与收益</title>
 <style>
+[hidden]{display:none!important}
 :root{color-scheme:dark;--bg:#10141c;--panel:#181e29;--line:#2b3444;--text:#e9edf5;--muted:#98a7bd;--blue:#70a3ff;--green:#57d6a0;--red:#ff8992;--gold:#edc37b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.65 "Segoe UI","Microsoft YaHei",sans-serif}main{max-width:1320px;margin:auto;padding:32px}h1,h2,p{margin:0}h1{font-size:28px;font-weight:650;letter-spacing:-.6px}h2{font-size:16px}a{color:var(--blue);text-decoration:none}header{display:flex;justify-content:space-between;align-items:start;gap:16px;margin-bottom:24px}.eyebrow{color:var(--blue);font-size:12px;letter-spacing:2px;margin-bottom:7px}.muted{color:var(--muted);font-size:12px}.badge{padding:5px 10px;border:1px solid var(--line);border-radius:6px;display:inline-block;font-size:12px;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}.metric{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;margin:8px 0 2px}.positive{color:var(--green)}.negative{color:var(--red)}.two{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(300px,1fr);gap:16px;margin-top:16px}.section{margin-top:16px}.heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap}button,select{background:#111722;color:var(--muted);border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer}button.active{background:#233b61;color:#b8d1ff;border-color:#527ab5}.legend{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0;color:var(--muted);font-size:12px}.legend i{display:inline-block;width:15px;height:3px;vertical-align:middle;margin-right:6px}.chart{position:relative}svg{display:block;width:100%;height:auto;overflow:visible}svg text{fill:var(--muted);font-size:11px;font-family:inherit}.hover{position:absolute;top:8px;left:70px;background:#0b101bea;border:1px solid #45516a;border-radius:6px;padding:6px 10px;pointer-events:none;font-size:12px;max-width:80%;display:none}.note{padding:10px 13px;background:#152339;border-left:3px solid var(--blue);border-radius:5px;font-size:12px;color:#b3c5df;margin-top:12px}.warning{border-left-color:var(--gold);background:#30291d;color:#e4ceaa}.stockhead{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}.summary{padding:12px 0;border-bottom:1px solid var(--line)}.summary:last-child{border:0}.summary p{margin-top:5px;color:var(--muted);font-size:13px}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}td,th{padding:10px 8px;text-align:left;border-bottom:1px solid var(--line)}th{font-weight:400;color:var(--muted)}.empty{padding:22px 8px;color:var(--muted);font-size:13px}footer{margin:20px 0;color:var(--muted);font-size:12px}details{margin-top:12px}li{margin:5px 0}.mono{font-family:Consolas,monospace;word-break:break-all}.error{padding:30px;color:var(--gold)}@media(max-width:900px){.two{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}main{padding:18px}}@media(max-width:500px){h1{font-size:22px}.metric{font-size:21px}header{display:block}.card{padding:14px}.heading{align-items:start;flex-direction:column}}
 </style></head><body><main>
 <header><div><div class="eyebrow">AGENT / PAPER PORTFOLIO</div><h1>模拟交易，跟着真实市场走</h1><p class="muted" id="subtitle">加载数据…</p></div><div><span class="badge" id="status">A股 · 只读展示</span> <a href="/">账户总览 ↗</a></div></header>
@@ -16,6 +17,15 @@
 <div class="card"><div class="muted">模拟持仓</div><div class="metric" id="positionCount"></div><div class="muted" id="tradeCount"></div></div>
 <div class="card"><div class="muted">手续费 / 滑点</div><div class="metric" id="fees"></div><div class="muted" id="slippage"></div></div>
 </div>
+<section id="comparisonPanel" class="card section" hidden><div class="heading"><h2>组合表现与空仓对照</h2><span class="badge" id="comparisonState"></span></div>
+<p class="muted" id="comparisonDates"></p><div class="grid section">
+<div><div class="muted">区间账本变化</div><div class="metric" id="comparisonPortfolio"></div></div>
+<div><div class="muted">沪深300全收益</div><div class="metric" id="comparisonIndex"></div></div>
+<div><div class="muted">相对指数差</div><div class="metric" id="comparisonGap"></div></div>
+<div><div class="muted">估值点平均现金比例</div><div class="metric" id="comparisonCash"></div></div></div>
+<div class="legend"><span><i style="background:var(--green)"></i>模拟账本变化</span><span><i style="background:var(--blue)"></i>沪深300全收益</span><span><i style="background:#9ba6ba"></i>现金本金（不计利息）</span></div>
+<svg id="comparisonChart" viewBox="0 0 1180 230" role="img" aria-label="事前登记起点后的组合、市场及现金对照"></svg>
+<div class="note" id="comparisonNote"></div><p class="muted" id="comparisonMethod"></p></section>
 <section class="card section"><div class="heading"><h2>持仓与持续观察名单</h2><span class="badge" id="watchCount"></span></div><p class="muted">点击公司切换走势图。实际仓位来自模拟账本；目标仓位是研究计划。旧判断保留各自日期，尚未研究的公司只展示行情。</p><div class="tablewrap" id="watchTable"></div></section>
 <div class="two">
 <section class="card"><div class="heading"><h2>股票真实走势</h2><div class="controls"><select id="stock" aria-label="选择股票"></select><div id="ranges"></div></div></div>
@@ -40,6 +50,21 @@ const money=v=>v==null?'待估值':'¥'+number(v), signed=(v,suffix='')=>v==null
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const set=(id,value)=>$(id).textContent=value, tone=v=>v<0?'negative':'positive';let range=60;
 function beijingTime(value){const time=new Date(value);return Number.isNaN(time.getTime())?'未知':time.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+'（北京时间）';}
+function drawComparison(){
+ const c=data.comparison;if(!c||c.status==='not_registered')return;$('comparisonPanel').hidden=false;
+ const labels={waiting_for_start:'等待登记后的首个收盘',waiting_for_portfolio_prices:'组合估值尚未齐备',ready:'事前登记对照',limited_accounting:'持仓权益口径待完善',stale:'对照数据尚未齐备',source_unavailable:'基准来源暂不可用',record_invalid:'记录待核对',account_unreconciled:'账本待对账'};
+ set('comparisonState',labels[c.status]||'等待数据');
+ set('comparisonDates',`登记 ${c.registered_at?beijingTime(c.registered_at):'—'} · 统一起点 ${c.start_session||'—'} 收盘 · 基准行情 ${c.source_as_of_date||'—'}${c.comparison_end?' · 已记录至 '+c.comparison_end:''}`);
+ set('comparisonPortfolio',signed(c.portfolio_return_pct,'%'));set('comparisonIndex',signed(c.benchmark_return_pct,'%'));
+ set('comparisonGap',c.return_gap_pp==null?'待完整对照':signed(c.return_gap_pp,'个百分点'));set('comparisonCash',c.cash_ratio_pct==null?'—':number(c.cash_ratio_pct)+'%');
+ const series=c.series||[];$('comparisonChart').toggleAttribute('hidden',!series.length);
+ if(series.length)plot('comparisonChart',[{color:'#57d6a0',points:series.map(p=>({date:p.date,value:p.portfolio_return_pct}))},{color:'#70a3ff',points:series.map(p=>({date:p.date,value:p.benchmark_return_pct}))},{color:'#9ba6ba',dash:true,points:series.map(p=>({date:p.date,value:p.cash_return_pct}))}],{width:1180,height:230,unit:'%'});
+ let note=c.message||'';
+ if(c.status==='ready'&&c.observations<2)note+=' 当前只有一个收盘点，尚不足以评价策略表现。';
+ else if(c.status==='ready'&&c.all_cash&&c.cash_opportunity_amount>0)note+=` 同期指数理论收益比现金本金多 ${money(c.cash_opportunity_amount)}；这是参考机会差，不是实际成交收益。`;
+ else if(c.status==='ready'&&c.all_cash&&c.cash_opportunity_amount<0)note+=` 同期指数下跌，现金本金避开约 ${money(-c.cash_opportunity_amount)} 的市场跌幅；现金账户实际收益仍为零。`;
+ set('comparisonNote',note);set('comparisonMethod',c.methodology||'');
+}
 function drawOpportunities(){
  const o=data.opportunities;if(!o||o.status!=='ready'){set('opportunities',o?.message||'尚未运行行业机会发现。');if(o?.status==='review_failed')set('opportunityState','评审失败 · 未形成新判断');return;}
  const labels={research_priority:'优先研究',monitor:'继续观察',risk:'风险线索',reject:'不进入长期研究'};
@@ -108,6 +133,6 @@ else{
  for(const n of [20,60,120,180]){const b=document.createElement('button');b.textContent=n+'日';b.className=n===range?'active':'';b.onclick=()=>{range=n;for(const x of $('ranges').children)x.className='';b.className='active';draw();};$('ranges').appendChild(b);}
  $('warnings').innerHTML=data.warnings.map(w=>`<div class="note warning">${esc(w)}</div>`).join('');
  $('trades').innerHTML=data.trades.length?'<table><thead><tr><th>日期</th><th>操作</th><th>股票</th><th>股数</th><th>成交价</th><th>费用</th><th>滑点成本</th></tr></thead><tbody>'+[...data.trades].reverse().map(t=>`<tr><td>${esc(t.trade_date)}</td><td class="${t.action==='BUY'?'positive':'negative'}">${esc(t.action)}</td><td>${esc(t.name)} ${esc(t.symbol)}</td><td>${t.shares}</td><td>¥${number(t.price,4)}</td><td>¥${number(t.fee)}</td><td>¥${number(t.slippage_cost||0)}</td></tr>`).join('')+'</tbody></table>':'<div class="empty">还没有模拟买入或卖出。下次实际模拟成交后，这里会出现交易记录，并在股价图上标记成交日期和价格。</div>';
- set('source',`来源：${data.source} · 缓存采集 ${data.fetched_at||'—'} · 页面刷新只读取本地数据`);$('limitations').innerHTML=data.limitations.map(s=>'<li>'+esc(s)+'</li>').join('');set('fingerprint','价格指纹 '+data.fingerprint);draw();
+ set('source',`来源：${data.source} · 缓存采集 ${data.fetched_at||'—'} · 页面刷新只读取本地数据`);$('limitations').innerHTML=data.limitations.map(s=>'<li>'+esc(s)+'</li>').join('');set('fingerprint','价格指纹 '+data.fingerprint);draw();drawComparison();
 }
 </script></body></html>

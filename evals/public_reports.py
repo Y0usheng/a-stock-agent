@@ -41,7 +41,7 @@ def public_url(value):
     parsed = urlsplit(value or "")
     if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port not in (None, 443):
         return ""
-    hosts = ("gov.cn", "eastmoney.com", "cls.cn", "cninfo.com.cn", "sse.com.cn", "szse.cn")
+    hosts = ("gov.cn", "eastmoney.com", "cls.cn", "cninfo.com.cn", "sse.com.cn", "szse.cn", "csindex.com.cn")
     if not any(parsed.hostname == host or (parsed.hostname or "").endswith("." + host) for host in hosts):
         return ""
     if re.search(r"(?i)(token|key|secret|password|auth)=", parsed.query):
@@ -71,6 +71,11 @@ def sanitize_view(view):
         result["pending_orders"] = [pick(row, "symbol action shares status execution_session approval_deadline information_cutoff_at state_recorded_at reference_price max_price_deviation_pct execution_policy") for row in view["pending_orders"]]
     result["portfolio"] = pick(view.get("portfolio", {}), "initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count journal_reconciled")
     result["portfolio_curve"] = [pick(row, "date total cumulative_return_pct") for row in view.get("portfolio_curve", [])]
+    if 'comparison' in view:
+        row = view['comparison']
+        result['comparison'] = pick(row, 'status message policy_id registered_at start_session index_code index_name source_as_of_date source_checked_at observations methodology comparison_start comparison_end reference_assets portfolio_return_pct benchmark_return_pct cash_ratio_pct all_cash return_gap_pp relative_pnl cash_opportunity_amount')
+        result['comparison']['source_url'] = public_url(row.get('source_url'))
+        result['comparison']['series'] = [pick(p, 'date portfolio_return_pct benchmark_return_pct cash_return_pct') for p in row.get('series', [])]
     result["positions"] = [pick(row, "symbol name shares avg_cost last_buy_date last_price market_value unrealized_pnl") for row in view.get("positions", [])]
     def trade(row):
         return pick(row, "symbol name trade_date action shares price fee slippage_cost")
@@ -182,6 +187,12 @@ def make_report(day, *, cache=PRICE_CACHE, ledger=None, logs=None, book=None):
     if latest.get("learning"):
         from agent.learning import public_summary
         view["learning"] = public_summary(latest["learning"])
+    from evals.portfolio_comparison import ComparisonBook, build_comparison
+    try:
+        view['comparison'] = build_comparison(ComparisonBook().context(cutoff.isoformat()), view['as_of_date'],
+                                              view['portfolio']['journal_reconciled'])
+    except (ValueError, OSError, KeyError):
+        view['comparison'] = {'status':'record_invalid','message':'组合基准记录未通过核对，暂不显示相对表现。','series':[]}
     view = sanitize_view(view)
     mode = latest.get("execution_mode", "no_analysis")
     if mode in {"pending", "paper"} and latest.get("queue_plan_hash"):
@@ -218,7 +229,8 @@ def validate_report(report):
             raise ValueError("报告含未来分析或价格")
     datetime.fromisoformat(report["published_at"])
     numeric = set("initial_cash cash total_assets net_pnl net_return_pct realized_pnl unrealized_pnl total_fees total_slippage trade_count position_count shares avg_cost last_price market_value price fee slippage_cost open high low close volume ma20 ma60 total cumulative_return_pct return_pct daily_change_pct last_close market_price horizon_days confidence calibrated_confidence target_weight actual_weight thesis_horizon_years bear_price base_price bull_price new_candidate_limit horizon_months priority observed_return_pct reference_price max_price_deviation_pct mature_samples pending_samples attempt_count".split())
-    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing", "learning"}
+    numeric.update('observations reference_assets portfolio_return_pct benchmark_return_pct cash_ratio_pct return_gap_pp relative_pnl cash_opportunity_amount cash_return_pct'.split())
+    containers = {"", "portfolio", "opportunities", "investment_case", "valuation", "decision", "prediction", "judgment", "timing", "learning", "comparison"}
     string_arrays = {"warnings", "limitations", "selected_symbols", "risk_review_symbols", "possible_symbols", "theme_ids", "omitted_theme_ids", "beneficiary_symbols", "research_watchlist", "baseline_review_symbols", "deferred_research_symbols", "symbols"}
     def check(value, key="", depth=0):
         if depth > 12:
@@ -237,8 +249,10 @@ def validate_report(report):
                 check(child, "", depth + 1)
         elif isinstance(value, str) and len(value) > 3000:
             raise ValueError("公开文本超限")
-        if key in {"date", "trade_date", "last_buy_date", "as_of_date", "selected_on", "observation_start", "price_as_of"} and value and date.fromisoformat(value) > day:
+        if key in {"date", "trade_date", "last_buy_date", "as_of_date", "selected_on", "observation_start", "price_as_of", 'comparison_start', 'comparison_end', 'source_as_of_date'} and value and date.fromisoformat(value) > day:
             raise ValueError("公开视图包含未来记录")
+        if key in {'registered_at','source_checked_at'} and value and event_time(value,'cn').date() > day:
+            raise ValueError('公开视图包含未来登记或检查记录')
     check(report["view"])
     base = {key: value for key, value in report.items() if key not in {"content_hash", "published_at"}}
     if report["content_hash"] != canonical_hash(base):
