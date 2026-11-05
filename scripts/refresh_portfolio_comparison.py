@@ -17,6 +17,7 @@ def main():
     book = ComparisonBook()
     try:
         sessions = calendar()['sessions']
+        stamp = now()  # Calendar refresh may cross the close; registration cannot use an earlier clock.
         policy = book.register(sessions, stamp.isoformat())
         completed = max(d for d in sessions if market_close(d,'cn') <= stamp)
         start = min((stamp-timedelta(days=30)).date().isoformat(), policy['start_session'])

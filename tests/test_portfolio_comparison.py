@@ -194,5 +194,22 @@ class PortfolioComparisonTests(unittest.TestCase):
             self.assertEqual(result['series'],[])
             self.assertNotIn('portfolio_return_pct',result)
 
+    def test_calendar_fetch_crossing_close_cannot_backdate_registration(self):
+        from scripts.refresh_portfolio_comparison import main
+        with tempfile.TemporaryDirectory() as tmp:
+            book=ComparisonBook(Path(tmp))
+            response=MagicMock(status_code=200,content=b'{}')
+            response.json.return_value={'data':[{'indexCode':'H00300','indexNameCnAll':'沪深300全收益指数',
+                'tradeDate':'20261026','close':100}]}
+            after='2026-10-26T15:00:01+08:00'
+            with patch('scripts.refresh_portfolio_comparison.ComparisonBook',return_value=book),\
+                 patch('scripts.refresh_portfolio_comparison.calendar',return_value={'sessions':DAYS}),\
+                 patch('scripts.refresh_portfolio_comparison.now',side_effect=[datetime.fromisoformat('2026-10-26T14:59:59+08:00'),datetime.fromisoformat(after)]),\
+                 patch('scripts.refresh_portfolio_comparison.PRICE_CACHE',Path(tmp)/'no-prices'),\
+                 patch('requests.get',return_value=response),patch('builtins.print'):
+                self.assertEqual(main(),0)
+            self.assertEqual(book.context(after)['policy']['start_session'],DAYS[1])
+            self.assertEqual(book.context(after)['policy']['registered_at'],after)
+
 
 if __name__=='__main__':unittest.main()
