@@ -17,9 +17,14 @@ AI_PAPER_POLICY = "autonomous-paper-execution-v1"
 
 
 def account_state(account):
-    return {"cash": round(account["cash"], 2), "positions": sorted([
+    result = {"cash": round(account["cash"], 2), "positions": sorted([
         {"symbol": row["symbol"], "shares": row["shares"], "avg_cost": round(row["avg_cost"], 6),
          "last_buy_date": row.get("last_buy_date")} for row in account["positions"] if row["shares"]], key=lambda row: row["symbol"])}
+    if 'corporate_rights_hash' in account:result['corporate_rights_hash']=account['corporate_rights_hash']
+    if account.get('corporate_rights'):
+        result['corporate_rights']=[{k:r[k] for k in ('symbol','cash_receivable','bonus_shares','pay_date','listing_date')}
+                                   for r in account['corporate_rights']]
+    return result
 
 
 def state_after(base, fills):
@@ -200,6 +205,7 @@ async def execute_due(host, queue=None, at=None):
         quotes = row["execution_snapshot"]
         try:
             symbols = sorted({d["symbol"] for d in decisions} | {p["symbol"] for p in payload["account_state"]["positions"]})
+            symbols=sorted(set(symbols)|{r['symbol'] for r in payload['account_state'].get('corporate_rights',[]) if r['bonus_shares']})
             if not quotes:
                 quotes = {symbol: await host.call("execution_session_quote", {"symbol": symbol, "day": day}) for symbol in symbols}
                 for symbol in symbols:
@@ -212,6 +218,7 @@ async def execute_due(host, queue=None, at=None):
             expected = state_after(payload["account_state"], fills)
             actual = account_state(account)
             same = (abs(actual["cash"] - expected["cash"]) <= .01 and len(actual["positions"]) == len(expected["positions"]))
+            same = same and actual.get('corporate_rights_hash',canonical_hash([]))==expected.get('corporate_rights_hash',canonical_hash([]))
             for left, right in zip(actual["positions"], expected["positions"]):
                 same = same and left["symbol"] == right["symbol"] and left["shares"] == right["shares"] and left["last_buy_date"] == right["last_buy_date"] and abs(left["avg_cost"] - right["avg_cost"]) <= .000002
             if not same:
@@ -238,6 +245,7 @@ async def execute_due(host, queue=None, at=None):
                 account = await host.call("get_account", {"current_prices": prices})
                 if action == "BUY" and symbol in cases:
                     held = sum(p["shares"] for p in account["positions"] if p["symbol"] == symbol)
+                    held += sum(r['bonus_shares'] for r in account.get('corporate_rights',[]) if r['symbol']==symbol)
                     if (held + decision["shares"]) * fill_price > account["total_assets"] * cases[symbol]["target_weight"] + .01:
                         errors.append({"symbol": symbol, "reason": "execution_exceeds_frozen_target_weight"})
                         continue

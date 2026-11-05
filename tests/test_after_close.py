@@ -210,6 +210,44 @@ class AfterCloseTests(unittest.TestCase):
             self.assertEqual(self.run_due(queue, AccountHost())[0]["status"], "blocked")
             self.assertEqual(account.get_trades(), [])
 
+    def test_receivable_change_blocks_old_plan_even_before_cash_arrives(self):
+        from servers import account_server as account
+        from evals.experiments import canonical_hash
+        with subscription_workspace() as root,patch.object(account,'DB_PATH',None),patch.object(account,'date',FixedDate):
+            account.DB_PATH=root/'account.db'
+            queue,identifier=self.setup_queue(root)
+            queue.confirm(identifier,at=DAY+'T18:00:00+08:00')
+            original=account.get_account
+            def changed(*args,**kwargs):
+                result=original(*args,**kwargs)
+                result['corporate_rights_hash']=canonical_hash([{'cash_receivable':100}])
+                return result
+            with patch.object(account,'get_account',side_effect=changed):
+                self.assertEqual(self.run_due(queue,AccountHost())[0]['status'],'blocked')
+            self.assertEqual(account.get_trades(),[])
+
+    def test_future_execution_fetches_prices_for_unlisted_only_exposure(self):
+        from evals.experiments import canonical_hash
+        context,result=example(True)
+        right={'symbol':'600036','bonus_shares':10,'cash_receivable':0,'pay_date':None,'listing_date':NEXT}
+        context['account'].update(corporate_rights=[right],corporate_rights_hash=canonical_hash([right]))
+        class RightsHost:
+            def __init__(self):self.quoted=[]
+            async def call(self,name,args):
+                if name=='execution_session_quote':
+                    self.quoted.append(args['symbol']);return {**quote(),'symbol':args['symbol']}
+                if name=='get_trades':return []
+                if name=='get_account':return {**context['account'],'total_assets':1001000 if '600036' in args['current_prices'] else None}
+                return {'ok':name!='buy'}
+        with subscription_workspace() as root:
+            queue=OrderQueue(root/'rights-queue.db')
+            with patch('agent.order_queue.now',return_value=clock(DAY+'T18:00:00+08:00')):
+                identifier=queue.stage(result,timing(),context['account'])
+            queue.confirm(identifier,at=DAY+'T18:00:00+08:00')
+            host=RightsHost()
+            self.assertEqual(self.run_due(queue,host)[0]['fills'],0)
+            self.assertIn('600036',host.quoted)
+
     def test_modified_queue_payload_or_adjusted_quote_is_rejected(self):
         from servers import account_server as account
         with subscription_workspace() as root, patch.object(account, "DB_PATH", None), patch.object(account, "date", FixedDate):

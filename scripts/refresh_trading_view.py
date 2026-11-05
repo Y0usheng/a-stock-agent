@@ -45,7 +45,7 @@ def main():
             raise ValueError("HTML输出不能覆盖价格缓存")
         local = datetime.now(market_zone("cn"))
         start = (local - timedelta(days=args.days * 2)).strftime("%Y%m%d")
-        histories = {}
+        histories, valuation_histories = {}, {}
         original = requests.sessions.Session.__init__
         def init_session(instance, *params, **kwargs):
             original(instance, *params, **kwargs)
@@ -73,10 +73,23 @@ def main():
                 if clean.empty:
                     raise ValueError(symbol + "无已收盘的真实价格")
                 histories[symbol] = clean.to_dict("records")
+                if args.provider=='eastmoney':
+                    raw=ak.stock_zh_a_hist(symbol=symbol,period='daily',start_date=start,
+                        end_date=local.strftime('%Y%m%d'),adjust='',timeout=25)
+                    raw=raw.rename(columns={'日期':'date','开盘':'open','收盘':'close','最高':'high','最低':'low','成交量':'volume'})
+                    raw['volume']=raw['volume']*100
+                else:
+                    raw=ak.stock_zh_a_daily(symbol=prefix+symbol,start_date=start,end_date=local.strftime('%Y%m%d'),adjust='')
+                raw['date']=raw['date'].astype(str)
+                raw=normalize_history(symbol,completed_history(raw,'cn')).tail(args.days)
+                if raw.empty or raw.iloc[-1]['date']!=clean.iloc[-1]['date']:
+                    raise ValueError(symbol+'未复权价格与观察价格日期不一致')
+                valuation_histories[symbol]=raw.to_dict('records')
         payload = {"market": "cn", "histories": histories, "price_basis": "qfq", "volume_unit": "shares",
             "source": ("AKShare / 东方财富 stock_zh_a_hist" if args.provider == "eastmoney" else "AKShare / 新浪财经 stock_zh_a_daily"), "data_quality": "live_prices",
             "fetched_at": local.isoformat(), "network_route": "direct" if args.direct else "configured_proxy",
-            "fingerprint": canonical_hash(histories)}
+            "fingerprint": canonical_hash(histories),'valuation_price_basis':'unadjusted',
+            'valuation_histories':valuation_histories,'valuation_fingerprint':canonical_hash(valuation_histories)}
         # 全部股票成功后才原子更新；失败保留上一份缓存。
         write_log(args.cache, payload)
         cache_updated = True

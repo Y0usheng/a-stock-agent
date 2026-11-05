@@ -47,7 +47,7 @@ def manager_instructions(market, as_of_date, symbols, version=None):
             from config import MARKETS, MAX_POSITION_PCT
             from agent.investment import LONG_INSTRUCTIONS
             prompt = (f"你是A股长期模拟投资经理，行情日{as_of_date}，研究池{','.join(symbols)}。" + LONG_INSTRUCTIONS +
-                f"股数为{MARKETS[market]['lot_size']}的倍数，单股不超过{MAX_POSITION_PCT:.0%}，受现金及T+1约束。"
+                f"买入股数为{MARKETS[market]['lot_size']}的倍数；卖出零股只允许一次清仓。单股不超过{MAX_POSITION_PCT:.0%}，受现金、T+1及送转上市日约束。"
                 "逐股论证、计划和252交易日预测；估值缺口保持空值并列补证任务，不编造数值。"
                 "建仓须研究完成、有业务和财务原始披露引用及明确估值；否则记录核心缺口，7天内复核。"
                 "计划参考价为冻结行情价。区分行情日与实际信息截止，只提出未来交易日收盘计划，未确认不成交。"

@@ -38,7 +38,7 @@ def manager_prompt(market, day, symbols):
     from agent.sdk_runner import RESULT_SCHEMA
     m = MARKETS[market]
     return (f"你是{m['name']}长期模拟投资经理，分析日{day}，固定研究池{','.join(symbols)}。\n" + LONG_INSTRUCTIONS +
-        f"\n硬约束：仅受控股票；股数为{m['lot_size']}整数倍，单股仓位不超过{MAX_POSITION_PCT:.0%}，遵守现金和T+1约束。"
+        f"\n硬约束：仅受控股票；买入股数为{m['lot_size']}整数倍，卖出零股只允许一次清仓；单股仓位不超过{MAX_POSITION_PCT:.0%}，遵守现金和T+1及送转上市日约束。"
         "只提出计划，由宿主交独立风控审批；不得声称尚未发生的审批或成交。"
         "业务/财务原文只是来源记录，估值是带假设的模型推断，不能承诺收益。"
         "每只股票提供investment_cases；一年252交易日预测用于阶段观察，不作为每日交易开关。"

@@ -3,6 +3,7 @@ import asyncio
 import os
 from dataclasses import asdict
 from copy import deepcopy
+from time import monotonic
 
 from agent.analysis import AnalysisHost, shadow_log_path, write_log
 from agent.contracts import validate_decision_result, validate_risk_approval
@@ -27,6 +28,17 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
         return receipt
     if force:
         raise ValueError("收盘后协议保留首次输出和队列，不支持强制覆盖")
+    corporate_seconds = 0
+    if not shadow:
+        # Settle verified entitlements before any due order. A changed economic
+        # account still fails the existing frozen-account check in execute_due.
+        await host.call('get_account', {})
+        from agent.corporate_settlement import synchronize
+        due_symbols = {d['symbol'] for p in queue.rows() if p['status'] in {'confirmed','executing'}
+                       for d in p['payload']['result']['decisions'] if d['action']!='HOLD'}
+        source_start=monotonic()
+        await asyncio.wait_for(asyncio.to_thread(synchronize,sorted(due_symbols),budget_seconds=60),timeout=65)
+        corporate_seconds=monotonic()-source_start
     if prompt_version == "manager-long-v3" and not shadow:
         from agent.learning import review_cached
         review_cached(now().isoformat())
@@ -50,7 +62,7 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     if formal_path.exists() and not shadow:
         return {"status": "skipped", "log_path": str(formal_path)}
     account = await host.call("get_account", {})
-    held = [row["symbol"] for row in account["positions"]]
+    held = sorted({row['symbol'] for row in account['positions']}|{r['symbol'] for r in account.get('corporate_rights',[]) if r['bonus_shares']})
     discovery = None
     if research_symbols:
         active = list(research_symbols)
@@ -79,7 +91,8 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     _assert_live_data(snapshot, {}, require_news=False)
     from agent.disclosures import collect
     print("自动补证：本轮最多2家公司，每家最新年报和最新中期报告；总预算90秒，零模型调用。")
-    collection = await asyncio.wait_for(asyncio.to_thread(collect, active[:2], budget_seconds=90), timeout=100)
+    source_remaining=max(1,90-corporate_seconds)
+    collection = await asyncio.wait_for(asyncio.to_thread(collect, active[:2], budget_seconds=source_remaining), timeout=source_remaining+10)
     screen = await asyncio.wait_for(host.call("after_close_symbol_news", {"symbols": active, "as_of_date": day}), timeout=max(25, 15 * len(active)))
     if discovery:
         screen["theme_discovery"] = discovery

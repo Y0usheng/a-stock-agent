@@ -30,7 +30,7 @@ def validate_trade_plan(decisions: list[dict], market: str,
         action, shares, price = item.get("action"), item.get("shares"), item.get("price")
         if action not in {"BUY", "SELL", "HOLD"}:
             raise ValueError(f"非法 action:{action}")
-        if isinstance(shares, bool) or not isinstance(shares, int) or shares < 0 or shares % lot:
+        if isinstance(shares, bool) or not isinstance(shares, int) or shares < 0 or (shares % lot and action!='SELL'):
             raise ValueError(f"{item['symbol']} 股数不符合市场最小单位")
         if (action == "HOLD" and shares != 0) or (action != "HOLD" and shares <= 0):
             raise ValueError(f"{item['symbol']} action 与 shares 不一致")
@@ -58,7 +58,7 @@ def capture_risk_review(proposed: list[dict], review: dict, market: str,
             raise ValueError(f"{item['symbol']} 风控审批与送审方向不同")
         if verdict not in {"APPROVE", "REJECT", "RESIZE"}:
             raise ValueError("非法风控 verdict")
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0 or maximum % lot:
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 0 or (maximum % lot and plan['action']!='SELL'):
             raise ValueError("风控 max_shares 不符合市场最小单位")
         if not isinstance(item.get("reason"), str) or not item["reason"].strip():
             raise ValueError("风控审批缺少 reason")
