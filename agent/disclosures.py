@@ -140,9 +140,14 @@ def extract_pages(path):
 
 
 def select_passages(document, extracted, tasks=()):
-    identity_text = "".join(page["text"] for page in extracted["pages"][:3])
-    if document["symbol"] not in re.sub(r"\s+", "", identity_text):
-        raise ValueError("PDF前页未找到对应股票代码，不能自动绑定公司")
+    identity_text = "\n".join(page["text"] for page in extracted["pages"][:3])
+    symbol = document["symbol"]
+    ticker = r"\s*".join(symbol)
+    if not re.search(rf"(?<!\d){ticker}(?!\d)", identity_text):
+        company_pages = "\n".join(page["text"] for page in extracted["pages"][3:6])
+        exchange = "SH" if symbol.startswith("6") else "SZ"
+        if not re.search(rf"(?<!\d){symbol}\s*\.\s*{exchange}\b", company_pages, re.IGNORECASE):
+            raise ValueError("PDF前页未找到对应股票代码，不能自动绑定公司")
     selected = []
     for category, terms in TERMS.items():
         requested = task_terms(tasks, category)
