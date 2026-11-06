@@ -35,9 +35,10 @@ MARKETS = {
             {"symbol": "002475", "name": "立讯精密"},
             {"symbol": "600276", "name": "恒瑞医药"},
             {"symbol": "300308", "name": "中际旭创"},
+            {"symbol": "002371", "name": "北方华创"},
         ],
         "candidate_limit": 8,
-        "investment_watchlist": ["300750", "600036", "600519"],
+        "investment_watchlist": ["300750", "600036", "600519", "300308", "002371"],
         "initial_cash": 1_000_000.0,
         "lot_size": 100,          # 一手100股
         "t_plus_1": True,         # 当日买入不可当日卖出

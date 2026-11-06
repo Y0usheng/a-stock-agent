@@ -41,7 +41,8 @@ PROFILES = {
 }
 INDUSTRIES = {'600036': 'bank', '600276': 'pharma', '600519': 'consumer',
               '300750': 'manufacturing', '002594': 'manufacturing', '601138': 'manufacturing',
-              '002475': 'manufacturing', '300308': 'manufacturing', '601899': 'resources', '600900': 'power'}
+              '002475': 'manufacturing', '300308': 'manufacturing', '002371': 'manufacturing',
+              '601899': 'resources', '600900': 'power'}
 LABELS = {'asset_quality':'资产质量', 'margin':'息差', 'capital':'资本', 'impairment':'信用减值',
           'business_mix':'业务结构', 'sales_mix':'创新药收入', 'research_spend':'研发投入',
           'licensing':'授权收入', 'earnings_quality':'盈利质量', 'sales_channels':'销售渠道',
