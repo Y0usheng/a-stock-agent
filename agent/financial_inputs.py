@@ -4,11 +4,13 @@ import re
 
 from evals.experiments import canonical_hash
 
-VERSION = 'source-financial-rows-v2'
+VERSION = 'source-financial-rows-v3'
 LABELS = {
     'eps': ('基本每股收益',), 'bvps': ('每股净资产',),
     'roe': ('加权平均净资产收益率', '平均净资产收益率'),
-    'revenue': ('营业收入',), 'operating_cashflow': ('经营活动产生的现金流量净额',),
+    'revenue': ('营业收入',),
+    'net_income': ('归属于上市公司股东的净利润', '归属于母公司股东的净利润', '归属于本行股东的净利润'),
+    'operating_cashflow': ('经营活动产生的现金流量净额',),
     'capex_cash': ('购建固定资产、无形资产和其他长期资产支付的现金',),
     'cash': ('货币资金',), 'short_borrowings': ('短期借款',), 'long_borrowings': ('长期借款',),
     'bonds': ('应付债券',), 'npl_ratio': ('不良贷款率',), 'capital_ratio': ('资本充足率',),
@@ -18,31 +20,41 @@ LABELS = {
     'credit_cost': ('信用成本率', '信用成本'),
 }
 PRIORITY = ('eps', 'bvps', 'roe', 'npl_ratio', 'net_interest_margin', 'provision_coverage',
-            'special_mention_ratio', 'credit_cost', 'capital_ratio', 'operating_cashflow',
+            'special_mention_ratio', 'credit_cost', 'capital_ratio', 'net_income', 'operating_cashflow',
             'capex_cash', 'cash', 'short_borrowings', 'long_borrowings', 'bonds', 'revenue')
-MONEY = re.compile(r'(?:单位\s*[:：]\s*(?:人民币)?|[（(]人民币)(百万元|千元|万元|亿元|元)')
+MONEY = re.compile(r'(?:单位\s*(?:[:：]|为)\s*(?:人民币)?|[（(]人民币)(百万元|千元|万元|亿元|元)')
 YEAR = re.compile(r'20\d{2}')
+HEADER_YEAR = re.compile(r'20\d{2}\s*年')
+MONTH_COLUMN = re.compile(r'(?<!\d)\d{1,2}\s*(?:[-－—–至]\s*\d{1,2}\s*)?月')
+TABLE_ROW = re.compile(r'^\s*(.*?)\s{2,}((?:不适用|[-−—(\d]).*?)\s*$')
 COLUMN_PERIOD = re.compile(r'20\d{2}\s*年(?:\s*(?:\d{1,2}\s*(?:[-－—–至]\s*\d{1,2})?\s*月'
                            r'(?:\s*\d{1,2}\s*日)?|(?:前[一二三四1-4]|第[一二三四1-4])季度|半年度|度|末))?')
 
 
 def table_column(anchors, year):
-    headers = [a['text'].strip() for a in anchors if len(YEAR.findall(a['text'])) >= 2]
-    if not headers:
+    header_positions = [i for i, a in enumerate(anchors) if len(HEADER_YEAR.findall(a['text'])) >= 2]
+    if not header_positions:
         return None
-    header = headers[-1]
+    index = header_positions[-1]
+    heading = anchors[index]
+    header = heading['text'].strip()
     years = YEAR.findall(header)
     if years[0] != year:
         return None
     periods = COLUMN_PERIOD.findall(header)
-    if len(set(years)) == 1:
-        # A repeated year alone cannot distinguish quarterly and cumulative columns.
-        # A multiline year row may continue the immediately preceding period row.
-        if len(periods) != len(years) or any(re.fullmatch(r'20\d{2}\s*年', p) for p in periods):
-            if len(headers) < 2 or YEAR.findall(headers[-2]) != years:
+    if len(set(years)) != len(years) and any(re.fullmatch(r'20\d{2}\s*年', p) for p in periods):
+        # A second header line can contain the months for each dated column.
+        continuation = anchors[index + 1] if index + 1 < len(anchors) else None
+        months = MONTH_COLUMN.findall(continuation['text']) if continuation else []
+        if (len(months) == len(years) and continuation['pdf_page'] == heading['pdf_page']
+                and continuation['start'] == heading['end']):
+            header += '\n' + continuation['text'].strip()
+            periods = [year + '年' + month for year, month in zip(years, months)]
+        elif len(header_positions) >= 2:
+            earlier = anchors[header_positions[-2]]['text'].strip()
+            if YEAR.findall(earlier) != years:
                 return None
-            header = headers[-2]
-            periods = COLUMN_PERIOD.findall(header)
+            header, periods = earlier, COLUMN_PERIOD.findall(earlier)
         if len(periods) != len(years) or any(re.fullmatch(r'20\d{2}\s*年', p) for p in periods):
             return None
     if not periods:
@@ -52,6 +64,8 @@ def table_column(anchors, year):
 
 def first_value(cells, header, columns):
     blocks = re.split(r'\s{2,}', cells.strip())
+    if len(blocks) < columns:
+        return None
     token_index = 0
     if '附注' in header:
         # Sorted text omits empty cells. Only consume an explicit note cell when
@@ -64,7 +78,7 @@ def first_value(cells, header, columns):
 
 
 def report_period(extracted):
-    text = re.sub(r'\s+', '', ''.join(p['text'] for p in extracted['pages'][:3]))
+    text = re.sub(r'\s+', '', ''.join(p['text'] for p in extracted['pages'][:6]))
     match = re.search(r'(20\d{2})年?(半年度|年度|第[一二三四1-4]季度)报告', text)
     return (match[1] + match[2]) if match else None
 
@@ -87,7 +101,7 @@ def extract_facts(document, extracted):
         return []
     year = period[:4]
     found = {}
-    statement_scope = None
+    statement_page = None
     anchors = []
     for page in extracted['pages']:
         text = page['text']
@@ -96,14 +110,18 @@ def extract_facts(document, extracted):
         for index, line in enumerate(lines):
             heading = re.sub(r'\s+', '', line)
             if re.fullmatch(r'合并(?:资产负债表|现金流量表|利润表|综合收益表)(?:[（(]续[)）])?', heading):
-                statement_scope, anchors, history = 'consolidated', [], []
+                statement_page, anchors, history = page['pdf_page'], [], []
             elif re.fullmatch(r'(?:母公司|本行)(?:资产负债表|现金流量表|利润表|综合收益表)(?:[（(]续[)）])?', heading):
-                statement_scope, anchors, history = 'parent', [], []
-            if MONEY.search(line) or len(YEAR.findall(line)) >= 2:
+                statement_page, anchors, history = None, [], []
+            period_continuation = (anchors and anchors[-1]['pdf_page'] == page['pdf_page']
+                                   and anchors[-1]['end'] == offset
+                                   and len(HEADER_YEAR.findall(anchors[-1]['text'])) >= 2
+                                   and len(MONTH_COLUMN.findall(line)) >= 2)
+            if MONEY.search(line) or len(HEADER_YEAR.findall(line)) >= 2 or period_continuation:
                 anchors.append({'text':line, 'pdf_page':page['pdf_page'], 'start':offset,
                                 'end':offset+len(line), 'page_text_hash':page['text_hash']})
                 anchors = anchors[-6:]
-            row = re.match(r'^\s*(.*?)\s{2,}([-−(\d].*?)\s*$', line)
+            row = TABLE_ROW.match(line)
             label = row[1] if row else ''
             cells = row[2] if row else ''
             if row and re.fullmatch(r'[\d,().−-]+', label.strip()):
@@ -115,25 +133,28 @@ def extract_facts(document, extracted):
                 if metric_name(combined):
                     label, metric = combined, metric_name(combined)
                     source_start -= len(lines[index-1])
-            if row and not metric and index+1 < len(lines) and len(lines[index+1].strip()) < 40:
+            if (row and not metric and index+1 < len(lines) and len(lines[index+1].strip()) < 40
+                    and not metric_name(lines[index+1]) and not TABLE_ROW.match(lines[index+1])):
                 combined = label + lines[index+1].strip()
                 if metric_name(combined):
                     label, metric = combined, metric_name(combined)
                     source_end += len(lines[index+1])
-            if row and not metric and not label.strip() and index and index+1 < len(lines):
+            if (row and not metric and not label.strip() and index and index+1 < len(lines)
+                    and not metric_name(lines[index+1]) and not TABLE_ROW.match(lines[index+1])):
                 combined = lines[index-1].strip() + lines[index+1].strip()
                 if metric_name(combined):
                     label, metric = combined, metric_name(combined)
                     source_start -= len(lines[index-1])
                     source_end += len(lines[index+1])
             if metric and metric not in found:
-                usable_anchors = [a for a in anchors if a['pdf_page']==page['pdf_page'] or
-                                  statement_scope=='consolidated' and 0 < page['pdf_page']-a['pdf_page'] <= 3]
+                in_statement = statement_page is not None and page['pdf_page'] - statement_page <= 3
+                usable_anchors = [a for a in anchors if a['pdf_page'] == page['pdf_page'] or
+                                  in_statement and 0 < page['pdf_page'] - a['pdf_page'] <= 3]
                 context = ''.join(a['text'] for a in usable_anchors) + ''.join(history[-35:])
                 column = table_column(usable_anchors, year)
                 selected = first_value(cells, column[0], column[2]) if column else None
                 summary = page['pdf_page'] <= 40 and ('会计数据' in text or '财务指标' in text)
-                scope_ok = summary or statement_scope == 'consolidated'
+                scope_ok = summary or in_statement
                 if selected and scope_ok:
                     cell, token_index = selected
                     if metric in {'eps', 'bvps'}:

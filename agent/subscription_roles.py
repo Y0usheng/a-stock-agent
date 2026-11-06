@@ -90,7 +90,8 @@ def current_materials(rows):
                 selected.append(row)
         from agent.research_tasks import task_materials
         covered = {key for r in selected for key in r.get('task_ids', [])}
-        selected.extend(r for r in task_materials(rows, 1) if set(r.get('task_ids', [])) - covered)
+        uncovered = [r for r in rows if set(r.get('task_ids', [])) - covered and r.get('unit_context_present') is not False]
+        selected.extend(task_materials(uncovered, 1))
         return selected
     selected = []
     for category in ("business", "financials"):
@@ -203,6 +204,8 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
                         text_limit = 650 // sum(r['categories']==['business'] for r in chosen)
                     if any(r.get('numeric_facts') for r in chosen) and any(r.get('task_ids') for r in chosen) and not row.get('numeric_facts'):
                         text_limit = 650 // max(1, sum(not r.get('numeric_facts') for r in chosen))
+                if compact and row.get('numeric_facts'):
+                    text_limit = 650  # Keep whole bound financial rows ahead of incidental prose.
                 if row.get('question_protocol'):
                     text_limit = min(len(row['excerpt']), 650)  # Retain whole windows within the hard presentation bound.
                 item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
@@ -268,7 +271,7 @@ def subscription_manifest(manifest: dict) -> dict:
             "technical_role": "host_quote_indicator_facts_v1"})
     if value.get("version") == "manager-long-v3":
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
-            "company_projection": "source-table-financial-rows-v7", "financial_protocol": "source-financial-rows-v2", "tasks": "question-tasks-v1", 'research_completion':RESEARCH_PROTOCOL, 'reference_slots':REFERENCE_PROTOCOL, "output_text_limit": 160, "manager_history_samples": 5,
+            "company_projection": "source-table-financial-rows-v8", "financial_protocol": "source-financial-rows-v3", "tasks": "question-tasks-v1", 'research_completion':RESEARCH_PROTOCOL, 'reference_slots':REFERENCE_PROTOCOL, "output_text_limit": 160, "manager_history_samples": 5,
             "company_news_per_symbol": 1, "empty_learning": "counts_only"})
     return value
 
@@ -284,6 +287,7 @@ class SubscriptionRoles:
         self.slots = reference_slots(self.catalog) if self.context.get('execution_policy') == 'autonomous-paper-execution-v1' else {}
         self.claims_by_role = {}
         self.raw_outputs = {}
+        self.role_input_chars = {}
 
     def audit(self):
         from agent.research_retrieval import eligible_coverage
@@ -291,6 +295,7 @@ class SubscriptionRoles:
             {r['payload'].get('material_id') for r in self.catalog['records'] if r['kind']=='company_document' and r['eligible']})
         return {"catalog": deepcopy(self.catalog), "analyst_claims": deepcopy(self.claims_by_role),
                 'source_delivery': delivered,
+                'role_input_chars': dict(self.role_input_chars),
                 "validation": "id_content_scope_symbol_and_publication_cutoff",
                 "semantic_support_verified": False,
                 **({'wire_reference_protocol':REFERENCE_PROTOCOL, 'wire_reference_slots':{v:k for k,v in self.slots.items()}} if self.slots else {}),
@@ -377,11 +382,8 @@ class SubscriptionRoles:
                 if compact:
                     for key in ("url", "data_source"):
                         record["data"].pop(key, None)
-                    if record["kind"] == "price_history" and name == "investment-manager":
-                        points = record["data"].get("monthly_observations", [])
-                        if len(points) > 5:
-                            record["data"]["monthly_observations"] = [points[round(i*(len(points)-1)/4)] for i in range(5)]
-                            record["data"]["presentation"] = "five_evenly_spaced_monthly_samples_and_recent_daily; full_history_retained_locally"
+                    if record["kind"] == "market_snapshot":
+                        record["data"] = _pick(record["data"], ("symbol", "name", "date", "close", "volume"))
                 for key in ("material_id", "pdf_sha256", "page_text_hash", "capture_protocol", "data_quality", "extraction_status", "expires_at", "first_seen_at", "history_hash"):
                     record["data"].pop(key, None)
                 if record["kind"] == "price_history" and name == "risk-manager":
@@ -396,13 +398,31 @@ class SubscriptionRoles:
                 analyst_input = json.loads(input)
                 payload["input"] = {role: json.loads(text)["claims"] for role, text in analyst_input.items()}
                 if compact:
-                    tasks = payload['research_tasks']
+                    tasks = sorted(payload['research_tasks'], key=lambda task: (
+                        not task['task_id'].startswith('gap_'), task['review_by']))
                     chosen_tasks = [row for symbol in context['symbols'] for row in [t for t in tasks if t['symbol']==symbol][:4]]
+                    payload.pop('past_predictions', None)
+                    opportunity = payload['opportunity_context']
+                    if opportunity:
+                        payload['opportunity_context'] = {
+                            'selection_mode': opportunity['selection_mode'],
+                            'themes': [
+                                {'name': theme['name'],
+                                 'hypothesis': {key: theme['hypothesis'][key] for key in (
+                                     'assessment', 'durability', 'horizon_months', 'mechanism', 'counterargument',
+                                     'validation_needed', 'invalidation_condition', 'beneficiary_symbols')},
+                                 'event_ids': [event['event_id'] for event in theme['events']]}
+                                for theme in opportunity['themes']]}
+                    payload['previous_cases'] = [
+                        {**row, 'case': {key: value for key, value in row['case'].items() if key != 'evidence'}}
+                        for row in payload['previous_cases']]
                     payload["research_tasks"] = [_pick(row, ("task_id", "symbol", "category", "what_to_fetch", "review_by", "status", "capture_status")) for row in chosen_tasks]
                     payload['research_tasks_omitted'] = len(tasks)-len(chosen_tasks)
             if name == "risk-manager":
                 payload["input"] = json.loads(input)
                 if compact:
+                    payload.pop('learning_context', None)
+                    payload.pop('auxiliary_gaps', None)
                     payload["input"] = {key: deepcopy(value) for key, value in payload["input"].items()
                                         if key in {"summary", "decisions", "proposed_decisions", "investment_cases", "investment_policy"}}
                     payload["input_scope"] += " 风控保留全部逐股交易计划和投资论证；方向预测及分析师复述不重复传入，也不作为交易批准。"
@@ -444,6 +464,7 @@ class SubscriptionRoles:
                 schema["properties"]["claims"].update(minItems=len(context["symbols"]), maxItems=len(context["symbols"]))
             if context.get("execution_policy") == "autonomous-paper-execution-v1":
                 schema = bounded_text_schema(schema)
+        self.role_input_chars[name] = len(prompt)
         result = await self.client.complete(prompt, schema, role=name)
         self.raw_outputs[name] = deepcopy(result)
         if self.slots:

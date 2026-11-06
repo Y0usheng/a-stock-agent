@@ -289,7 +289,10 @@ class ResearchBook(TaskTracker):
                 if information_cutoff_at:
                     available = [row for row in available if event_time(row["first_seen_at"], "cn") <= cutoff]
                     from agent.disclosures import VERSION as CAPTURE_VERSION
-                    available = [row for row in available if not row.get("pdf_sha256") or row.get("capture_protocol") == CAPTURE_VERSION]
+                    from agent.financial_inputs import VERSION as FINANCIAL_VERSION
+                    available = [row for row in available if not row.get("pdf_sha256") or (
+                        row.get("capture_protocol") == CAPTURE_VERSION and
+                        (not row.get("numeric_facts") or row.get("financial_protocol") == FINANCIAL_VERSION))]
                 available = select_materials(available, 8)
                 materials += available[:8]
                 query = "SELECT payload,day,log_hash FROM cases WHERE symbol=? AND day<?"

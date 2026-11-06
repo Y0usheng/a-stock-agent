@@ -115,6 +115,41 @@ class FinancialInputTests(unittest.TestCase):
             self.assertIn('2026年7-9月',fact_line(facts[name]))
             self.assertNotIn('2026年1-9月',fact_line(facts[name]))
 
+    def test_split_quarter_headers_and_wrapped_unavailable_cashflow(self):
+        source = pages(
+            '601318 2026年第三季度报告\n主要会计数据及财务指标\n'
+            '2026 年    2025 年 同比变动    2026 年    2025 年 同比变动\n'
+            '7-9 月    7-9 月    （%）    1-9 月    1-9 月    （%）\n'
+            '营业收入（人民币百万元）    152,996    332,864    (54.0)    728,134    832,940    (12.6)\n'
+            '归属于母公司股东扣除非经常性损益后的净利润\n'
+            '（人民币百万元）    3,875    68,486    (94.3)    91,587    142,057    (35.5)\n'
+            '经营活动产生的现金流量净额\n'
+            '（人民币百万元）    不适用  不适用  不适用    566,872    340,147    66.7\n',
+            '合并现金流量表\n单位：百万元\n2026年1-9月    2025年1-9月\n'
+            '经营活动产生的现金流量净额    566,872    340,147\n')
+        facts = {f['metric']: f for f in extract_facts({**DOC, 'symbol': '601318', 'document_type': 'interim'}, source)}
+        self.assertEqual(facts['revenue']['column_period'], '2026年7-9月')
+        self.assertEqual(facts['operating_cashflow']['value'], '566872')
+        self.assertEqual(facts['operating_cashflow']['column_period'], '2026年1-9月')
+        self.assertEqual(facts['operating_cashflow']['pdf_page'], 2)
+        self.assertNotIn('net_income', facts)
+
+    def test_annual_identity_page_and_group_balance_scope(self):
+        from agent.disclosures import select_passages
+        doc = {**DOC, 'symbol': '601318'}
+        cover = ['', '目录', '释义', '董事会审议通过《2025年年度报告》正文及摘要。', '上市股票 601318.SH']
+        group = ('合并资产负债表\n（除特别注明外，金额单位为人民币百万元）\n'
+                 '附注八    2025年12月31日    2024年12月31日\n'
+                 '货币资金    1    745,679    683,433\n')
+        segment = ('单位：百万元\n2025年度    2024年度\n'
+                   '应付债券    88,138    23,456\n')
+        source = pages(*cover, group, '', '', '', segment)
+        select_passages(doc, source)
+        with self.assertRaises(ValueError):
+            select_passages(doc, pages(*cover[:4], '数字 601318', group))
+        facts = extract_facts(doc, source)
+        self.assertEqual([(f['metric'], f['value'], f['unit']) for f in facts], [('cash', '745679', '百万元')])
+
     def test_repeated_bare_year_without_period_is_ambiguous(self):
         text = ('600036 2026年第三季度报告\n主要会计数据\n单位：百万元\n'
                 '2026年1-9月  2025年1-9月\n经营活动产生的现金流量净额    146    176\n'
