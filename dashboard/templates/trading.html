@@ -80,7 +80,7 @@ function drawOpportunities(){
  $('opportunities').innerHTML=`<p class="muted">公开快讯与受控导入资料仅部分覆盖市场；模型提出的受益关系仍待公司资料核验。每轮新增研究最多 ${o.new_candidate_limit} 家。</p>`+
  (receipt?`<p class="muted">最近采集：${esc(receipt.observed_at||'本轮')} · ${esc(receipt.status)} · 接收 ${receipt.accepted??0} 条；采集时间晚于截止的新闻留待后续研究。</p>`:'')+
  (o.review_error?`<div class="note warning">主题判断未完成：${esc(o.review_error)}。本轮没有据此增加新候选。</div>`:'')+
- o.themes.map(t=>{const j=t.judgment;return `<details><summary><b>${esc(t.name)}</b> · ${j?esc(labels[j.assessment]):'未评价线索'}${t.possible_symbols.length?'':' · 候选池尚未覆盖'}</summary>`+
+ o.themes.map(t=>{const j=t.judgment;return `<details><summary><b>${esc(t.name)}</b> · ${t.status==='priority_downgraded'?'继续观察 · 未通过优先条件':j?esc(labels[j.assessment]):'未评价线索'}${t.possible_symbols.length?'':' · 候选池尚未覆盖'}</summary>`+
  (j?`<p>模型假设：${esc(j.mechanism)}</p><p>反方观点：${esc(j.counterargument)}</p><p>需核对：${esc(j.validation_needed)}</p><p>失效条件：${esc(j.invalidation_condition)} · 观察 ${j.horizon_months} 个月</p>`:'<p>关键词只提供线索，尚无模型长期判断。</p>')+
  t.events.map(e=>`<div class="summary"><a href="${esc(e.url)}" target="_blank" rel="noopener noreferrer">${esc(e.title)}</a><p>${esc(e.source_kind==='media_report'?'媒体报道':e.source_kind==='official_policy'?'政策原文':'公司披露')} · ${esc(e.published_at)} · ${esc(e.event_id)}</p><p>${esc(e.excerpt||'公开页面仅提供来源链接；原文片段保留在本机供核验。')}</p></div>`).join('')+'</details>';}).join('')+
  (!o.themes.length?'<div class="note">本轮没有可在截止前确认采集的主题线索；没有为产生交易而补造判断。</div>':'')+

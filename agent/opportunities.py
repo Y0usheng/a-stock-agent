@@ -16,6 +16,7 @@ from servers.data_quality import event_time, market_close, market_zone
 
 VERSION = "news-opportunities-v3"
 REVIEW_THEME_LIMIT = 3
+PRIORITY_ERROR = "短期噪声或无支持资料不能成为长期优先研究主题"
 DB = DATA_DIR / "opportunities.db"
 # These are research mappings, not verified revenue exposures. Unmapped themes remain visible.
 THEMES = {
@@ -263,6 +264,13 @@ def review_schema(leads):
         "required": ["themes"], "additionalProperties": False}
 
 
+def priority_is_ineligible(row):
+    return row["assessment"] == "research_priority" and (
+        not row["supporting_event_ids"] or row["horizon_months"] < 12
+        or row["durability"] not in {"structural", "cyclical"}
+    )
+
+
 def validate_review(review, leads):
     from jsonschema import validate
     validate(review, review_schema(leads))
@@ -287,8 +295,8 @@ def validate_review(review, leads):
             raise ValueError("候选公司超出待核验业务映射")
         if any(not row[field].strip() or len(row[field]) > 500 for field in ("mechanism", "counterargument", "validation_needed", "invalidation_condition")):
             raise ValueError("需给出简洁、完整的机制和待核验/失效条件")
-        if row["assessment"] == "research_priority" and (not support or row["horizon_months"] < 12 or row["durability"] not in {"structural", "cyclical"}):
-            raise ValueError("短期噪声或无支持资料不能成为长期优先研究主题")
+        if priority_is_ineligible(row):
+            raise ValueError(PRIORITY_ERROR)
 
 
 def wire_review_schema(leads):
@@ -319,7 +327,7 @@ def wire_review_schema(leads):
     return {"type": "object", "$defs": definitions, "properties": properties, "required": list(properties), "additionalProperties": False}
 
 
-def normalize_wire_review(wire, leads):
+def normalize_wire_review(wire, leads, *, downgraded=None):
     from jsonschema import validate
     validate(wire, wire_review_schema(leads))
     rows = []
@@ -338,9 +346,16 @@ def normalize_wire_review(wire, leads):
             target = "supporting_event_ids" if annotation["stance"] == "support" else "contradicting_event_ids"
             row[target].append(event["event_id"])
             row["source_observations"].append({"event_id": event["event_id"], "source_kind": event["source_kind"], "quote": annotation["quote"]})
+        if downgraded is not None and priority_is_ineligible(row):
+            downgraded.add(row["theme_id"])
+            row["assessment"] = "monitor"
         rows.append(row)
     result = {"themes": rows}
     validate_review(result, leads)
+    if downgraded:
+        for row in rows:
+            if row["theme_id"] in downgraded:
+                row["beneficiary_symbols"] = []
     return result
 
 
@@ -350,13 +365,17 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
         raise ValueError("研究新候选上限须为1至6")
     book = book or OpportunityBook()
     resumed = None
+    recover_priority_error = False
+    downgraded = set()
     if resume_snapshot:
         rows = book._read("SELECT payload FROM snapshots WHERE id=?", (resume_snapshot,))
         if len(rows) != 1 or not use_model:
             raise ValueError("找不到可续跑的模型评审快照")
         resumed = rows[0]
+        recover_priority_error = resumed.get("review_error") == f"ValueError: {PRIORITY_ERROR}"
         if (canonical_hash({k: v for k, v in resumed.items() if k != "fingerprint"}) != resume_snapshot
-                or resumed.get("review_error") or resumed["as_of_date"] != feed["as_of_date"]):
+                or resumed["as_of_date"] != feed["as_of_date"]
+                or resumed.get("review_error") and not recover_priority_error):
             raise ValueError("续跑快照被改写、评审失败或行情日不同")
         current_cutoff = event_time(feed.get("information_cutoff_at") or market_close(feed["as_of_date"], "cn").isoformat(), "cn")
         prior_cutoff = event_time(resumed.get("information_cutoff_at") or resumed["cutoff"], "cn")
@@ -370,7 +389,13 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
         if not set(captured) <= eligible:
             raise ValueError("续跑原文的身份或可用时间未通过检查")
         leads, excluded = deepcopy(resumed["themes"]), deepcopy(resumed["excluded_events"])
-        validate_review({"themes": [t["judgment"] for t in leads]}, leads)
+        if recover_priority_error:
+            for lead in leads:
+                lead.pop("judgment")
+                lead.pop("status")
+        else:
+            validate_review({"themes": [t["judgment"] for t in leads]}, leads)
+            downgraded.update(t["theme_id"] for t in leads if t.get("status") == "priority_downgraded")
     else:
         leads, excluded = route_feed(feed)
     # Latest-first round robin cap avoids spending unbounded context on the whole archive.
@@ -382,10 +407,11 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
     leads = leads[:REVIEW_THEME_LIMIT]
     review, usage, error, cached = None, {"requests_started": 0}, "", False
     if resumed:
-        review = {"themes": [t["judgment"] for t in leads]}
         cached = True
         usage = {"requests_started": 0, "completed_calls": 0, "total_tokens": 0, "usage_complete": True, "cache_hit": True}
-    if use_model and leads and not resumed:
+        if not recover_priority_error:
+            review = {"themes": [t["judgment"] for t in leads]}
+    if use_model and leads and (not resumed or recover_priority_error):
         from agent.subscription import SubscriptionClient
         client = client or SubscriptionClient(DEFAULT_OPENAI_MODEL)
         client.settings.update(request_limit=1, token_limit=12000, input_char_limit=28000, request_timeout=75)
@@ -401,29 +427,49 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
             payload["information_cutoff_at"] = feed["information_cutoff_at"]
         identity = canonical_hash({"version": VERSION, "instructions": INSTRUCTIONS, "schema": schema,
                                    "model": client.model, "settings": client.settings, "payload": payload})
+        receipt_path = book.path.parent / "review_receipts" / (identity + ".json")
         try:
-            stored = book.cached_review(identity)
+            stored = None if recover_priority_error else book.cached_review(identity)
             if stored:
                 review, cached = stored["review"], True
+                downgraded.update(stored.get("downgraded_themes", []))
             else:
-                wire = await client.complete(INSTRUCTIONS + "\n" + json.dumps(payload, ensure_ascii=False), schema, role="opportunity-researcher")
-                from agent.analysis import write_log
-                write_log(book.path.parent / "review_receipts" / (identity + ".json"), {"model_input": payload, "wire_output": wire,
-                    "usage": client.report(), "identity": identity, "status": "received_not_yet_validated"})
-                review = normalize_wire_review(wire, leads)
+                if recover_priority_error:
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    source_usage = receipt["usage"]
+                    if (receipt["identity"] != identity or receipt["model_input"] != payload
+                            or receipt["status"] != "received_not_yet_validated"
+                            or source_usage != resumed["usage"]
+                            or source_usage.get("requests_started") != 1 or source_usage.get("completed_calls") != 1
+                            or source_usage.get("usage_complete") is not True
+                            or not 0 < source_usage.get("total_tokens", 0) <= client.settings["token_limit"]):
+                        raise ValueError("续跑回执的输入或用量未通过核验")
+                    wire = receipt["wire_output"]
+                else:
+                    wire = await client.complete(INSTRUCTIONS + "\n" + json.dumps(payload, ensure_ascii=False), schema, role="opportunity-researcher")
+                    from agent.analysis import write_log
+                    source_usage = client.report()
+                    write_log(receipt_path, {"model_input": payload, "wire_output": wire,
+                        "usage": source_usage, "identity": identity, "status": "received_not_yet_validated"})
+                    if source_usage.get("requests_started") and source_usage.get("usage_complete") is not True:
+                        raise ValueError("新闻评审用量不完整")
+                review = normalize_wire_review(wire, leads, downgraded=downgraded)
+                if recover_priority_error and not downgraded:
+                    raise ValueError("续跑回执没有原先被拒绝的主题")
+                book.save_review(identity, {"review": review, "wire_output": wire, "model_input": payload,
+                    "usage": source_usage, "model": client.model, "downgraded_themes": sorted(downgraded)})
             validate_review(review, leads)
-            if not cached:
-                book.save_review(identity, {"review": review, "wire_output": wire, "model_input": payload, "usage": client.report(), "model": client.model})
         except Exception as exc:
             from agent.errors import safe_error
             review, error = None, safe_error(exc)
-        usage = client.report() if not cached else {"requests_started": 0, "cache_hit": True}
+        if not resumed:
+            usage = client.report() if not cached else {"requests_started": 0, "cache_hit": True}
     assessments = {row["theme_id"]: row for row in review["themes"]} if review else {}
     ranked = []
     for lead in leads:
         row = assessments.get(lead["theme_id"])
         lead["judgment"] = row
-        lead["status"] = "model_hypothesis_unverified" if row else "unreviewed_keyword_lead"
+        lead["status"] = ("priority_downgraded" if row["theme_id"] in downgraded else "model_hypothesis_unverified") if row else "unreviewed_keyword_lead"
         if row and row["assessment"] == "research_priority":
             ranked.extend((row["priority"], lead["theme_id"], symbol) for symbol in row["beneficiary_symbols"])
     selected = list(dict.fromkeys(symbol for _, _, symbol in sorted(ranked)))[:limit]
@@ -443,7 +489,7 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
     active = list(dict.fromkeys(selected + risk_review + retained + fallback))
     watchlist = list(dict.fromkeys([s for s in baseline_symbols if s in allowed] + selected + risk_review + retained + fallback))
     baseline, deferred_symbols = [], []
-    if baseline_symbols and not error and not resumed:
+    if baseline_symbols and not error and (not resumed or recover_priority_error):
         # News does not exhaust the research mandate. When there are no endorsed
         # beneficiaries, reserve one existing slot for a neutral company review.
         neutral = [s for s in baseline_symbols if s in allowed and s not in selected + retained + risk_review]
@@ -486,8 +532,10 @@ async def discover(feed, held=(), previous_symbols=(), *, book=None, client=None
         snapshot.update(information_cutoff_at=feed["information_cutoff_at"], cutoff=feed["information_cutoff_at"],
                         timing_policy="after_close_information_then_future_session_execution", discovery_decided_at=datetime.now(market_zone("cn")).isoformat())
     if resumed:
-        snapshot.update(discovery_decided_at=resumed.get("discovery_decided_at"), resumed_from=resume_snapshot,
-            routing_resumed_at=datetime.now(market_zone("cn")).isoformat(), resume_source_usage=resumed["usage"])
+        snapshot.update(resumed_from=resume_snapshot, routing_resumed_at=datetime.now(market_zone("cn")).isoformat(),
+            resume_source_usage=resumed["usage"])
+        if not recover_priority_error:
+            snapshot["discovery_decided_at"] = resumed.get("discovery_decided_at")
     snapshot["fingerprint"] = canonical_hash(snapshot)
     book.save(snapshot)
     return snapshot

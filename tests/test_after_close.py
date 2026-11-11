@@ -450,9 +450,11 @@ class AfterCloseTests(unittest.TestCase):
                 return {"candidate_snapshot": context["snapshot"], "trading_sessions": {"sessions": [DAY, NEXT], "fingerprint": None},
                         "get_account": context["account"], "market_discovery_feed": {}}[name]
         with patch("agent.after_close.make_timing", return_value=timing()), \
+             patch("agent.run_daily.date", wraps=date) as quote_clock, \
              patch("agent.after_close.OpportunityBook") as book, \
              patch("agent.after_close.discover", new=AsyncMock(return_value={"active_symbols": [], "review_error": "fixture timeout"})), \
              patch("agent.after_close.run_agent_graph") as graph:
+            quote_clock.today.return_value = date.fromisoformat(DAY)
             book.return_value.latest.return_value = {}
             with self.assertRaisesRegex(RuntimeError, "新闻主题评审失败"):
                 asyncio.run(run_after_close(Host(), shadow=True))
