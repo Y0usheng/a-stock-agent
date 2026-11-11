@@ -54,7 +54,8 @@ class FakeClient:
         return wire
 
     def report(self):
-        return {"requests_started": self.calls, "total_tokens": 10 * self.calls}
+        return {"requests_started": self.calls, "completed_calls": self.calls,
+                "total_tokens": 10 * self.calls, "usage_complete": True}
 
 
 class OpportunityTests(unittest.TestCase):
@@ -84,6 +85,57 @@ class OpportunityTests(unittest.TestCase):
             self.assertEqual(resumed['themes'], first['themes'])
             with self.assertRaises(ValueError):
                 asyncio.run(discover({**feed(), 'as_of_date':'2026-10-25'}, book=book, resume_snapshot=first['fingerprint']))
+
+    def test_ineligible_priority_does_not_discard_other_topics(self):
+        source = feed([event(), event(title="创新药临床试验",
+            excerpt="公开测试片段：创新药临床效果、授权条款和实际回款仍需核对。", suffix="2")])
+        leads, _ = route_feed(source)
+        response = judgment(leads)
+        next(row for row in response["themes"] if row["theme_id"] == "computing")["durability"] = "uncertain"
+        client = FakeClient(response)
+        result = self.run_discovery(source, client=client, limit=2, baseline_symbols=["600036"])
+        self.assertEqual(result["review_error"], "")
+        self.assertEqual(result["selected_symbols"], ["600276"])
+        self.assertIn("600036", result["active_symbols"])
+        computing = next(row for row in result["themes"] if row["theme_id"] == "computing")
+        self.assertEqual(computing["status"], "priority_downgraded")
+        self.assertEqual(computing["judgment"]["assessment"], "monitor")
+        self.assertEqual(computing["judgment"]["beneficiary_symbols"], [])
+        self.assertEqual(client.calls, 1)
+
+    def test_resume_priority_error_reuses_only_the_matching_complete_receipt(self):
+        source = {**feed(), "information_cutoff_at": DAY + "T15:30:00+08:00"}
+        leads, _ = route_feed(source)
+        response = judgment(leads)
+        response["themes"][0]["durability"] = "uncertain"
+        client = FakeClient(response)
+        with subscription_workspace() as root:
+            book = OpportunityBook(root / "opportunities.db")
+            # Reproduce the original failure and its archive using the strict validator.
+            with patch("agent.opportunities.normalize_wire_review",
+                       side_effect=lambda wire, leads, **_: normalize_wire_review(wire, leads)):
+                failed = asyncio.run(discover(source, book=book, client=client))
+            self.assertTrue(failed["review_error"])
+            from datetime import datetime
+            from servers.data_quality import market_zone
+            later = {**source, "information_cutoff_at": datetime.now(market_zone("cn")).isoformat()}
+            recovered = asyncio.run(discover(later, book=book, client=client, limit=1,
+                                             resume_snapshot=failed["fingerprint"], baseline_symbols=["600036"]))
+            self.assertEqual(recovered["review_error"], "")
+            self.assertEqual(recovered["active_symbols"], ["600036"])
+            self.assertEqual(recovered["selected_symbols"], [])
+            self.assertEqual(recovered["usage"]["requests_started"], 0)
+            self.assertEqual(recovered["resume_source_usage"]["total_tokens"], 10)
+            self.assertEqual(recovered["themes"][0]["status"], "priority_downgraded")
+            receipt_path = next((root / "review_receipts").glob("*.json"))
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["usage"]["usage_complete"] = False
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            rejected = asyncio.run(discover(later, book=book, client=client, limit=1,
+                                            resume_snapshot=failed["fingerprint"], baseline_symbols=["600036"]))
+            self.assertTrue(rejected["review_error"])
+            self.assertEqual(rejected["selected_symbols"], [])
+            self.assertEqual(client.calls, 1)
 
     def test_valid_risk_theme_routes_to_exposure_checks_without_claiming_beneficiaries(self):
         leads, _ = route_feed(feed())

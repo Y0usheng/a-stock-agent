@@ -75,7 +75,14 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
         resume = os.environ.get("ASTOCK_RESUME_NEWS") or None
         feed = {"as_of_date": day, "information_cutoff_at": preliminary["information_cutoff_at"]} if resume else await asyncio.wait_for(host.call("market_discovery_feed", {"as_of_date": day, "after_close": True}), timeout=25)
         previous = [s for s in prior.get('active_symbols', []) if s in baseline or s in held]
-        discovery = await discover(feed, held=held, previous_symbols=previous, book=book, limit=2, resume_snapshot=resume, baseline_symbols=baseline)
+        limit = 2
+        if resume:
+            from agent.runtime import positive_env
+            limit = positive_env("ASTOCK_RESUME_NEWS_LIMIT", limit)
+            if limit > 2:
+                raise ValueError("收盘后续跑最多新增两家研究对象")
+        discovery = await discover(feed, held=held, previous_symbols=previous, book=book, limit=limit,
+                                   resume_snapshot=resume, baseline_symbols=baseline)
         active = discovery["active_symbols"]
         if discovery.get("review_error"):
             raise RuntimeError("新闻主题评审失败，未形成有效候选判断；请检查发现记录，本轮未进入投资经理")
