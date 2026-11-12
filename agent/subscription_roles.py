@@ -278,7 +278,8 @@ def subscription_manifest(manifest: dict) -> dict:
 
 class SubscriptionRoles:
     def __init__(self, context: dict, market: str, manager_prompt: str, model: str, *, allow_synthetic=False, long_term=False):
-        self.client = SubscriptionClient(model)
+        company_research = context.get("execution_policy") == "autonomous-paper-execution-v1"
+        self.client = SubscriptionClient(model, company_research=company_research)
         self.long_term = long_term
         self.context = export_paper_context(context, market, long_term)
         self.definitions = build_agent_definitions()

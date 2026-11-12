@@ -113,7 +113,8 @@ async def run_after_close(host, *, shadow=False, research_symbols=None, approve_
     recent = await host.call("get_trades", {"limit": 20})
     memory = build_memory_snapshot("cn", day, LOG_DIR, recent, include_after_close=prompt_version == "manager-long-v3", cutoff_at=preliminary["information_cutoff_at"] if prompt_version == "manager-long-v3" else None)
     manifest = build_graph_manifest("cn", day, active, prompt_version, "subscription")
-    metadata = {"agent_sdk": {"prompt": manifest, "role_models": {name: asdict(model) for name, model in resolve_role_routing().items()}, "budget": subscription_settings()}}
+    metadata = {"agent_sdk": {"prompt": manifest, "role_models": {name: asdict(model) for name, model in resolve_role_routing().items()},
+                              "budget": subscription_settings(company_research=prompt_version == "manager-long-v3")}}
     path = shadow_log_path(LOG_DIR, day, "cn", metadata) if shadow else formal_path
     if path.exists():
         return {"status": "skipped", "log_path": str(path)}

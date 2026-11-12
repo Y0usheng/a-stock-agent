@@ -201,6 +201,48 @@ class SubscriptionAsyncTests(unittest.IsolatedAsyncioTestCase):
                 await client.complete('fixture', {}, role='risk-manager')
             login.assert_not_called()
 
+    async def test_company_budget_accepts_recorded_usage_and_rejects_over_limit(self):
+        cases = [(12_419, 783, 41_008), (16_412, 783, 45_001)]
+        for risk_input, risk_output, expected in cases:
+            with self.subTest(total_tokens=expected), patch.dict(os.environ, {}, clear=True):
+                client = SubscriptionClient("fixture", company_research=True)
+                client._login = {"binary": "fixture"}
+                self.assertEqual(client.settings["token_limit"], 45_000)
+                self.assertEqual(client.settings["planning_token_target"], 40_000)
+                self.assertEqual(client.settings["risk_token_reserve"], 14_000)
+                usage = [(10_024, 769), (13_598, 3_415), (risk_input, risk_output)]
+                replies = [events(usage={"input_tokens": inputs, "output_tokens": outputs, "cached_input_tokens": 0})
+                           for inputs, outputs in usage]
+                with patch("agent.subscription._run_codex", side_effect=replies) as run:
+                    await client.complete("fixture", {}, role="fundamental-analyst")
+                    await client.complete("fixture", {}, role="investment-manager")
+                    if expected > 45_000:
+                        with self.assertRaisesRegex(RuntimeError, "超过预算"):
+                            await client.complete("fixture", {}, role="risk-manager")
+                    else:
+                        self.assertEqual(await client.complete("fixture", {}, role="risk-manager"), {"ok": True})
+                    self.assertEqual(run.call_count, 3)
+                self.assertEqual(client.report()["total_tokens"], expected)
+                self.assertEqual(client.report()["tokens_over_target"], expected - 40_000)
+                self.assertTrue(client.report()["usage_complete"])
+
+    async def test_company_budget_guards_risk_reserve_before_opening_requests(self):
+        with patch.dict(os.environ, {}, clear=True):
+            client = SubscriptionClient("fixture", company_research=True)
+        client.requests_started = 1
+        client.calls = [{"role": "fundamental-analyst", "input_tokens": 10_000, "output_tokens": 13_001,
+                         "cached_input_tokens": 0, "reasoning_output_tokens": None}]
+        with patch("agent.subscription.check_subscription_login") as login:
+            with self.assertRaisesRegex(RuntimeError, "预算不足"):
+                await client.complete("fixture", {}, role="investment-manager")
+            client.requests_started = 2
+            client.calls[0]["output_tokens"] = 1_001
+            client.calls.append({"role": "investment-manager", "input_tokens": 17_000, "output_tokens": 3_000,
+                                 "cached_input_tokens": 0, "reasoning_output_tokens": None})
+            with self.assertRaisesRegex(RuntimeError, "预算不足"):
+                await client.complete("fixture", {}, role="risk-manager")
+            login.assert_not_called()
+
     async def test_rejected_response_preserves_known_terminal_usage_and_budget(self):
         client = SubscriptionClient('fixture')
         client._login = {'binary': 'fixture'}

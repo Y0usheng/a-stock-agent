@@ -178,7 +178,7 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         raise ValueError("未知模型接入方式")
     if model_access == "subscription":
         from agent.subscription import subscription_settings
-        subscription_config = subscription_settings()
+        subscription_config = subscription_settings(company_research=prompt_version == "manager-long-v3")
         settings = None
         setting_identity = {"effort": subscription_config["reasoning_effort"], "verbosity": subscription_config["verbosity"],
                             "isolation_profile": subscription_config["isolation_profile"],
