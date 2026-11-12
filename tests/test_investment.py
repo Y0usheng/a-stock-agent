@@ -256,7 +256,7 @@ class LongGraphTests(unittest.IsolatedAsyncioTestCase):
             news_screen = {"offline": False, "as_of_date": DAY, "candidates": []}
         reader = AnalysisHost(Host(), context["snapshot"], context["fundamentals"], context["account"], [])
         class Client:
-            def __init__(self, model): self.calls = []
+            def __init__(self, model, *, company_research=False): self.calls = []
             async def complete(self, prompt, schema, role):
                 calls.append((role, prompt, schema))
                 self.calls.append({"role": role, "input_tokens": 1, "output_tokens": 1})

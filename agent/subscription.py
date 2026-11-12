@@ -25,15 +25,20 @@ INSTRUCTIONS = (
 )
 
 
-def subscription_settings() -> dict:
+def subscription_settings(*, company_research=False) -> dict:
     effort = os.environ.get("ASTOCK_REASONING_EFFORT", "low").strip()
     if effort not in {"low", "medium", "high", "xhigh", "max"}:
         raise ValueError("订阅推理强度必须为 low/medium/high/xhigh/max")
-    return {"reasoning_effort": effort, "verbosity": "low", "isolation_profile": "tools-disabled-v2", "max_output_tokens": None,
-            "request_limit": positive_env("ASTOCK_SUBSCRIPTION_MAX_REQUESTS", 4),
-            "token_limit": positive_env("ASTOCK_SUBSCRIPTION_MAX_TOKENS", 40_000),
-            "input_char_limit": positive_env("ASTOCK_SUBSCRIPTION_MAX_INPUT_CHARS", 24_000),
-            "request_timeout": positive_env("ASTOCK_SUBSCRIPTION_TIMEOUT", 120)}
+    token_limit = positive_env("ASTOCK_SUBSCRIPTION_MAX_TOKENS", 45_000 if company_research else 40_000)
+    settings = {"reasoning_effort": effort, "verbosity": "low", "isolation_profile": "tools-disabled-v2", "max_output_tokens": None,
+                "request_limit": positive_env("ASTOCK_SUBSCRIPTION_MAX_REQUESTS", 4),
+                "token_limit": token_limit,
+                "input_char_limit": positive_env("ASTOCK_SUBSCRIPTION_MAX_INPUT_CHARS", 24_000),
+                "request_timeout": positive_env("ASTOCK_SUBSCRIPTION_TIMEOUT", 120)}
+    if company_research:
+        settings.update(planning_token_target=min(40_000, token_limit),
+                        risk_token_reserve=min(14_000, token_limit // 2))
+    return settings
 
 
 def codex_binary() -> str:
@@ -347,9 +352,9 @@ def parse_codex_events(stdout: str) -> tuple[dict, dict]:
 
 
 class SubscriptionClient:
-    def __init__(self, model: str):
+    def __init__(self, model: str, *, company_research=False):
         self.model = model
-        self.settings = subscription_settings()
+        self.settings = subscription_settings(company_research=company_research)
         self.calls: list[dict] = []
         self.rejected_calls: list[dict] = []
         self.requests_started = 0
@@ -364,13 +369,17 @@ class SubscriptionClient:
         reasons = [call["reasoning_output_tokens"] for call in observed]
         usage["reasoning_output_tokens"] = sum(reasons) if reasons and all(
             value is not None for value in reasons) else None
+        total_tokens = usage["input_tokens"] + usage["output_tokens"]
+        target = self.settings.get("planning_token_target")
+        if target is not None:
+            usage["tokens_over_target"] = max(0, total_tokens - target)
         return {**self.settings, **usage, "requests_started": self.requests_started,
                 "completed_calls": len(observed), "validated_calls": len(self.calls), "rejected_calls": len(self.rejected_calls),
                 "usage_complete": self.requests_started == len(observed),
                 "transport_attempts": list(self.transport_attempts),
                 "transport_recovery_notices": sum(row.get("recovery_notices", 0) for row in self.transport_attempts),
                 "retry_usage_scope": "terminal_usage_only; incomplete_connection_attempt_usage_unavailable",
-                "total_tokens": usage["input_tokens"] + usage["output_tokens"],
+                "total_tokens": total_tokens,
                 "budget_enforcement": "completed_calls_and_next_call_gate"}
 
     async def complete(self, prompt: str, schema: dict, *, role: str) -> dict:
@@ -384,10 +393,18 @@ class SubscriptionClient:
             # Codex has request overhead beyond our prompt. Do not start another four-role
             # request when almost no budget remains; completed usage is still checked below.
             reserve = min(8000, self.settings["token_limit"] // 4)
+            risk_reserve = self.settings.get("risk_token_reserve")
+            if role == "investment-manager" and risk_reserve is not None:
+                reserve += risk_reserve
             if role == "risk-manager":
-                reserve = max([reserve] + [call["input_tokens"] for call in self.calls if call["role"] == "fundamental-analyst"])
-            if self.settings["request_limit"] == 4 and self.calls and self.settings["token_limit"] - report["total_tokens"] < reserve:
+                reserve = max([reserve, risk_reserve or 0] +
+                              [call["input_tokens"] for call in self.calls if call["role"] == "fundamental-analyst"])
+            remaining = self.settings["token_limit"] - report["total_tokens"]
+            if self.calls and (risk_reserve is not None or self.settings["request_limit"] == 4) and remaining < reserve:
                 raise RuntimeError("剩余订阅预算不足以保留下一角色开销，停止后续调用")
+            if (role == "risk-manager" and risk_reserve is not None
+                    and report["total_tokens"] + reserve > self.settings["planning_token_target"]):
+                print("本轮公司研究预计需要使用预算缓冲。", flush=True)
             if self._login is None:
                 self._login = await asyncio.to_thread(check_subscription_login)
             with subscription_workspace() as root:
