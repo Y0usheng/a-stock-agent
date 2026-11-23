@@ -16,6 +16,28 @@ TOPICS = ('客户集中', '客户资产', '零售客户', '存款结构', '存�
           '产量', '单位成本', '矿种', '项目回报', '资本承诺', '债务到期', '现金流',
           '净利润', '净资产', '营业收入', '资本开支', '分红', '负债', '成本', '竞争')
 FINAL = {'resolved', 'migrated', 'quarantined', 'closed_rejected'}
+FINANCIAL_TERMS = {
+    'revenue': ('营业收入', '营收'), 'net_income': ('归母净利', '归母净利润'),
+    'operating_cashflow': ('经营现金流', '经营活动产生的现金流量净额'),
+    'capex_cash': ('资本开支', '购建固定资产'), 'eps': ('EPS', '每股收益'),
+    'inventory': ('存货',), 'receivables': ('应收账款', '应收'),
+    'cash': ('货币资金',), 'short_borrowings': ('短期借款', '短债'),
+    'long_borrowings': ('长期借款',), 'current_liabilities': ('流动负债',),
+}
+
+
+def financial_task_matches(facts, tasks):
+    """Link matching rows as candidate evidence, even if a question needs several sources."""
+    matches = {}
+    for task in tasks:
+        if task.get('task_protocol') != PROTOCOL or task.get('category') not in {'financials', 'valuation'}:
+            continue
+        question = task['what_to_fetch'].upper()
+        ids = [fact['fact_id'] for fact in facts
+               if any(term in question for term in FINANCIAL_TERMS.get(fact['metric'], ()))]
+        if ids:
+            matches[task['task_id']] = ids
+    return matches
 
 
 def questions(gap):

@@ -4,7 +4,7 @@ import re
 
 from evals.experiments import canonical_hash
 
-VERSION = 'source-financial-rows-v3'
+VERSION = 'source-financial-rows-v4'
 LABELS = {
     'eps': ('基本每股收益',), 'bvps': ('每股净资产',),
     'roe': ('加权平均净资产收益率', '平均净资产收益率'),
@@ -13,6 +13,7 @@ LABELS = {
     'operating_cashflow': ('经营活动产生的现金流量净额',),
     'capex_cash': ('购建固定资产、无形资产和其他长期资产支付的现金',),
     'cash': ('货币资金',), 'short_borrowings': ('短期借款',), 'long_borrowings': ('长期借款',),
+    'inventory': ('存货',), 'receivables': ('应收账款',), 'current_liabilities': ('流动负债合计',),
     'bonds': ('应付债券',), 'npl_ratio': ('不良贷款率',), 'capital_ratio': ('资本充足率',),
     'net_interest_margin': ('净利息收益率', '净息差'),
     'provision_coverage': ('拨备覆盖率', '不良贷款拨备覆盖率'),
@@ -21,23 +22,54 @@ LABELS = {
 }
 PRIORITY = ('eps', 'bvps', 'roe', 'npl_ratio', 'net_interest_margin', 'provision_coverage',
             'special_mention_ratio', 'credit_cost', 'capital_ratio', 'net_income', 'operating_cashflow',
-            'capex_cash', 'cash', 'short_borrowings', 'long_borrowings', 'bonds', 'revenue')
+            'capex_cash', 'cash', 'short_borrowings', 'revenue', 'inventory', 'receivables',
+            'current_liabilities', 'long_borrowings', 'bonds')
 MONEY = re.compile(r'(?:单位\s*(?:[:：]|为)\s*(?:人民币)?|[（(]人民币)(百万元|千元|万元|亿元|元)')
+INLINE_MONEY = re.compile(r'[（(]\s*(?:人民币)?(百万元|千元|万元|亿元|元)\s*[）)]$')
 YEAR = re.compile(r'20\d{2}')
 HEADER_YEAR = re.compile(r'20\d{2}\s*年')
 MONTH_COLUMN = re.compile(r'(?<!\d)\d{1,2}\s*(?:[-－—–至]\s*\d{1,2}\s*)?月')
 TABLE_ROW = re.compile(r'^\s*(.*?)\s{2,}((?:不适用|[-−—(\d]).*?)\s*$')
 COLUMN_PERIOD = re.compile(r'20\d{2}\s*年(?:\s*(?:\d{1,2}\s*(?:[-－—–至]\s*\d{1,2})?\s*月'
                            r'(?:\s*\d{1,2}\s*日)?|(?:前[一二三四1-4]|第[一二三四1-4])季度|半年度|度|末))?')
+STATEMENT_HEADING = re.compile(r'(?:\d+[、.．])?(合并|母公司|本行)(年初[到至]报告期末)?'
+                               r'(资产负债表|现金流量表|利润表|综合收益表)(?:[（(]续[)）])?')
+RELATIVE_HEADERS = {'期末余额': '期初余额', '本期发生额': '上期发生额'}
+PERIOD_END_MONTH = {'第一季度': 3, '第1季度': 3, '半年度': 6, '第二季度': 6, '第2季度': 6,
+                    '第三季度': 9, '第3季度': 9, '年度': 12, '第四季度': 12, '第4季度': 12}
+FLOW_METRICS = {'revenue', 'net_income', 'eps', 'roe', 'operating_cashflow', 'capex_cash'}
 
 
-def table_column(anchors, year):
-    header_positions = [i for i, a in enumerate(anchors) if len(HEADER_YEAR.findall(a['text'])) >= 2]
+def relative_column(text):
+    cells = re.split(r'\s{2,}', text.strip())
+    return next((a for a, b in RELATIVE_HEADERS.items() if cells in ([a, b], ['项目', a, b], ['项目', '附注', a, b])), None)
+
+
+def table_column(anchors, year, statement=None, period=None):
+    header_positions = [i for i, a in enumerate(anchors)
+                        if len(HEADER_YEAR.findall(a['text'])) >= 2 or relative_column(a['text'])]
     if not header_positions:
         return None
     index = header_positions[-1]
     heading = anchors[index]
     header = heading['text'].strip()
+    relative = relative_column(header)
+    if relative:
+        if not statement:
+            return None
+        scope, year_to_date, kind = statement
+        if scope != '合并':
+            return None
+        if relative == '期末余额' and kind == '资产负债表':
+            dates = [re.sub(r'\s+', '', a['text']) for a in anchors[:index]
+                     if re.fullmatch(r'\s*20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\s*', a['text'])]
+            if dates and dates[-1].startswith(year + '年'):
+                return header, dates[-1], 2
+        if relative == '本期发生额' and year_to_date and kind in {'利润表', '现金流量表', '综合收益表'}:
+            month = PERIOD_END_MONTH.get(period[4:])
+            if month:
+                return header, f'{year}年1-{month}月', 2
+        return None
     years = YEAR.findall(header)
     if years[0] != year:
         return None
@@ -85,6 +117,7 @@ def report_period(extracted):
 
 def metric_name(label):
     label = re.sub(r'\s+|[（(]\d+[)）]', '', label)
+    label = re.sub(r'^(?:(?:\d+|[一二三四五六七八九十]+)[.、．]|[（(][一二三四五六七八九十]+[)）]|其中[：:])', '', label)
     # Diluted, adjusted and sector-specific ratios cannot replace their headline measures.
     if any(word in label for word in ('稀释', '扣除', '调整', '核心一级', '一级资本', '房地产业')):
         return None
@@ -102,6 +135,7 @@ def extract_facts(document, extracted):
     year = period[:4]
     found = {}
     statement_page = None
+    statement = None
     anchors = []
     for page in extracted['pages']:
         text = page['text']
@@ -109,15 +143,23 @@ def extract_facts(document, extracted):
         lines = text.splitlines(keepends=True)
         for index, line in enumerate(lines):
             heading = re.sub(r'\s+', '', line)
-            if re.fullmatch(r'合并(?:资产负债表|现金流量表|利润表|综合收益表)(?:[（(]续[)）])?', heading):
-                statement_page, anchors, history = page['pdf_page'], [], []
-            elif re.fullmatch(r'(?:母公司|本行)(?:资产负债表|现金流量表|利润表|综合收益表)(?:[（(]续[)）])?', heading):
-                statement_page, anchors, history = None, [], []
+            statement_heading = STATEMENT_HEADING.fullmatch(heading)
+            if statement_heading:
+                statement = statement_heading.groups()
+                statement_page = page['pdf_page'] if statement[0] == '合并' else None
+                anchors, history = [], []
+            elif ('分季度主要财务指标' in heading or
+                  re.search(r'第一季度.*第二季度.*第三季度', heading)):
+                # This is a new quarter-by-quarter table, even on the same page.
+                statement = statement_page = None
+                anchors, history = [], []
             period_continuation = (anchors and anchors[-1]['pdf_page'] == page['pdf_page']
                                    and anchors[-1]['end'] == offset
                                    and len(HEADER_YEAR.findall(anchors[-1]['text'])) >= 2
                                    and len(MONTH_COLUMN.findall(line)) >= 2)
-            if MONEY.search(line) or len(HEADER_YEAR.findall(line)) >= 2 or period_continuation:
+            date_line = re.fullmatch(r'20\d{2}年\d{1,2}月\d{1,2}日', heading)
+            if (MONEY.search(line) or len(HEADER_YEAR.findall(line)) >= 2 or period_continuation
+                    or relative_column(line) or (statement_page == page['pdf_page'] and date_line)):
                 anchors.append({'text':line, 'pdf_page':page['pdf_page'], 'start':offset,
                                 'end':offset+len(line), 'page_text_hash':page['text_hash']})
                 anchors = anchors[-6:]
@@ -151,10 +193,12 @@ def extract_facts(document, extracted):
                 usable_anchors = [a for a in anchors if a['pdf_page'] == page['pdf_page'] or
                                   in_statement and 0 < page['pdf_page'] - a['pdf_page'] <= 3]
                 context = ''.join(a['text'] for a in usable_anchors) + ''.join(history[-35:])
-                column = table_column(usable_anchors, year)
+                column = table_column(usable_anchors, year, statement if in_statement else None, period)
+                if column and metric in FLOW_METRICS and column[1].endswith(('日', '年末')):
+                    column = None
                 selected = first_value(cells, column[0], column[2]) if column else None
                 summary = page['pdf_page'] <= 40 and ('会计数据' in text or '财务指标' in text)
-                scope_ok = summary or in_statement
+                scope_ok = (summary or in_statement) and not (statement and statement[0] != '合并')
                 if selected and scope_ok:
                     cell, token_index = selected
                     if metric in {'eps', 'bvps'}:
@@ -163,12 +207,13 @@ def extract_facts(document, extracted):
                                     'provision_coverage', 'special_mention_ratio', 'credit_cost'}:
                         unit = '%' if cell[2] or '%' in context + row[1] or '％' in context + row[1] else None
                     else:
-                        units = list(MONEY.finditer(context))
-                        unit = units[-1][1] if units else None
+                        inline_unit = INLINE_MONEY.search(label.strip())
+                        units = list(MONEY.finditer(''.join(a['text'] for a in usable_anchors)))
+                        unit = inline_unit[1] if inline_unit else units[-1][1] if units else None
                     if unit:
                         value = cell[1].replace(',', '').replace('−', '-')
                         fact = {'metric': metric, 'label': label.strip(), 'value': value, 'unit': unit,
-                                'period': period, 'scope': 'group_summary' if summary else 'consolidated',
+                                'period': period, 'scope': 'consolidated' if in_statement else 'group_summary',
                                 'column_header': column[0], 'column_period': column[1],
                                 'value_token_index': token_index, 'pdf_page': page['pdf_page'],
                                 'source_context': usable_anchors,
