@@ -45,6 +45,37 @@ class FinancialInputTests(unittest.TestCase):
         self.assertEqual(extract_facts(DOC,pages(text+'营业收入    100    90\n')),[])
         self.assertEqual(extract_facts(DOC,pages(text+'稀释每股收益（元/股）    5    4\n')),[])
 
+    def test_quarter_table_cannot_inherit_annual_or_balance_columns(self):
+        source = pages('300308 2025年度报告\n主要会计数据和财务指标\n'
+                       '项目    2025年    2024年\n'
+                       '营业收入（元）    38239    23862\n'
+                       '归属于上市公司股东\n    10797    5171\n的净利润（元）\n'
+                       '项目    2025年末    2024年末\n资产总额（元）    45289    28867\n'
+                       '六、分季度主要财务指标\n单位：元\n'
+                       '项目    第一季度    第二季度    第三季度    第四季度\n'
+                       '营业收入    6674    8115    10216    13235\n')
+        facts = {f['metric']: f for f in extract_facts({**DOC, 'symbol':'300308'}, source)}
+        self.assertEqual((facts['revenue']['value'], facts['revenue']['column_period']), ('38239', '2025年'))
+        self.assertEqual(facts['net_income']['value'], '10797')
+        no_annual = pages(source['pages'][0]['text'].replace('营业收入（元）    38239    23862\n', ''))
+        self.assertNotIn('revenue', {f['metric'] for f in extract_facts(DOC, no_annual)})
+
+    def test_relative_columns_require_their_own_dated_consolidated_statement(self):
+        source = pages('300308 2026年第三季度报告\n1、合并资产负债表\n'
+                       '2026年09月30日\n单位：元\n项目    期末余额    期初余额\n',
+                       '存货    23000    12000\n短期借款    336    301\n'
+                       '2、合并年初到报告期末现金流量表\n单位：元\n'
+                       '项目    本期发生额    上期发生额\n经营活动产生的现金流量净额    8008    5454\n',
+                       '购建固定资产、无形资产和其他长\n    9160    1614\n期资产支付的现金\n'
+                       '母公司现金流量表\n单位：元\n本期发生额    上期发生额\n'
+                       '购建固定资产、无形资产和其他长期资产支付的现金    99    95\n')
+        doc = {**DOC, 'symbol':'300308', 'document_type':'interim'}
+        facts = {f['metric']: f for f in extract_facts(doc, source)}
+        self.assertEqual((facts['inventory']['value'], facts['inventory']['column_period']), ('23000', '2026年09月30日'))
+        self.assertEqual((facts['capex_cash']['value'], facts['capex_cash']['column_period']), ('9160', '2026年1-9月'))
+        undated = pages(*(p['text'].replace('2026年09月30日\n', '').replace('合并年初到报告期末', '合并') for p in source['pages']))
+        self.assertEqual(extract_facts(doc, undated), [])
+
     def test_wrapped_cash_capex_and_header_continuation_preserve_anchors(self):
         source = pages('601899 2026年第三季度报告\n合 并 现 金 流 量 表\n'
                        '单位：元\n项目  2026年1-9月  2025年1-9月\n',

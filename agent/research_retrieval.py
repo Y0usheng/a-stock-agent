@@ -1,9 +1,14 @@
 """Question-led source windows. A matched passage is a candidate, not an answer."""
+from decimal import Decimal
 import re
 
 from evals.experiments import canonical_hash
 
 PROTOCOL = 'question-source-windows-v1'
+OPERATING_TABLE = 'operating-breakdown-v1'
+OPERATING_TITLE = re.compile(r'主营业务分(行业|产品)情况')
+TABLE_NUMBER = re.compile(r'-?\d[\d,]*(?:\.\d+)?')
+TABLE_REQUESTS = ('分产品', '分行业', '产品毛利', '产品利润', '产品结构', '收入和成本')
 # Industry operating questions, not stock recommendations or numerical forecasts.
 PROFILES = {
     'bank': (
@@ -53,6 +58,84 @@ LABELS = {'asset_quality':'资产质量', 'margin':'息差', 'capital':'资本',
 
 def _label(question_id):
     return LABELS.get(question_id, '补证' + question_id[-8:])
+
+
+def _operating_sections(grid):
+    """Read whole ruled-table sections, preserving the source's industry/product distinction."""
+    for index, cells in enumerate(grid[:-2]):
+        title = OPERATING_TITLE.fullmatch(cells[0])
+        if not title or any(cells[1:]):
+            continue
+        header = grid[index + 1][:4]
+        if header != ['分' + title[1], '营业收入', '营业成本', '毛利率（%）']:
+            continue
+        rows = []
+        for row in grid[index + 2:]:
+            if row[0] and not any(row[1:]):
+                break
+            if not row[0] or not all(TABLE_NUMBER.fullmatch(value) for value in row[1:4]):
+                rows = []
+                break
+            revenue, cost, margin = (Decimal(value.replace(',', '')) for value in row[1:4])
+            if revenue <= 0 or abs(100 * (revenue - cost) / revenue - margin) > Decimal('0.02'):
+                rows = []
+                break
+            rows.append(row[:4])
+        if rows:
+            yield title[1], rows
+
+
+def operating_breakdown(document, extracted, pdf_path):
+    """Capture a bounded business table using PDF cell positions and its own nearby unit."""
+    if document['document_type'] != 'annual':
+        return None
+    pages = [page for page in extracted['pages'] if OPERATING_TITLE.search(page['text'])][:3]
+    if not pages:
+        return None
+    import pymupdf
+    from agent.financial_inputs import MONEY, report_period
+    period = report_period(extracted)
+    if not period:
+        return None
+    with pymupdf.open(pdf_path) as pdf:
+        for source in pages:
+            page_number = source['pdf_page']
+            page = pdf[page_number - 1]
+            text = source['text']
+            for table in page.find_tables().tables:
+                x0, y0, x1, _ = table.bbox
+                above = page.get_text(clip=pymupdf.Rect(x0, max(0, y0 - 25), x1, y0))
+                units = set(MONEY.findall(re.sub(r'\s+', '', above)))
+                if len(units) != 1:
+                    continue
+                unit = units.pop()
+                grid = [[re.sub(r'\s+', '', cell or '').replace('(%)', '（%）') for cell in row] for row in table.extract()]
+                spans, sections, labels = [], [], []
+                for kind, rows in _operating_sections(grid):
+                    title = '主营业务分' + kind + '情况'
+                    if text.count(title) != 1:
+                        continue
+                    start = text.index(title)
+                    next_heading = re.search(r'主营业务分(?:行业|产品|地区|销售模式)(?:情况|、)|\n\s*[（(]\d+[）)]', text[start + len(title):])
+                    end = start + len(title) + next_heading.start() if next_heading else len(text)
+                    # Numbers must also be present in this section of the saved page text.
+                    # Position-based cells disambiguate wrapped labels and adjacent columns.
+                    original = re.sub(r'\s+', '', text[start:end])
+                    if any(value not in original for row in rows for value in row[1:]):
+                        continue
+                    spans.append({'pdf_page': page_number, 'start': start, 'end': end, 'page_text_hash': source['text_hash']})
+                    labels.append('分' + kind)
+                    sections.append('按' + kind + '披露\n' + '\n'.join(' | '.join(row) for row in rows))
+                excerpt = (f'PDF第{page_number}页，{period}，金额单位：{unit}。\n'
+                           '原表口径 | 营业收入 | 营业成本 | 毛利率（%）\n' + '\n'.join(sections))
+                if spans and len(excerpt) <= 580:
+                    return {**document, 'categories': ['business'], 'operating_table_protocol': OPERATING_TABLE,
+                            'operating_table_scopes': labels, 'report_period': period, 'excerpt': excerpt,
+                            'locator': f'PDF第{page_number}页主营业务收入与成本表',
+                            'pdf_page': page_number, 'source_spans': spans, 'data_quality': 'imported',
+                            'data_source': '官方公告PDF表格单元格', 'source_truth_verified': False,
+                            'page_excerpt_complete': False, 'extraction_status': 'operating_rows_bound_to_pdf'}
+    return None
 
 
 def source_questions(symbol, tasks=()):
@@ -179,9 +262,22 @@ def coverage(materials, presented):
     """Source presence, budget omission and semantic verification are separate states."""
     rows = []
     for material in materials:
+        visible = next((r for r in presented if r.get('material_id') == material.get('material_id')), None)
+        if material.get('operating_table_protocol') == OPERATING_TABLE:
+            rows.extend({'symbol': material['symbol'], 'question_id': task_id,
+                         'material_id': material.get('material_id'), 'pdf_page': material['pdf_page'],
+                         'status': 'visible_candidate_not_verified' if visible and visible['excerpt'] == material['excerpt']
+                            else 'omitted_by_input_budget',
+                         'semantic_verified': False} for task_id in material.get('task_ids', []))
+        if material.get('task_facts'):
+            presented_facts = {f['fact_id'] for f in (visible or {}).get('numeric_facts', [])}
+            for question_id, fact_ids in material['task_facts'].items():
+                rows.append({'symbol': material['symbol'], 'question_id': question_id,
+                             'material_id': material.get('material_id'),
+                             'status': 'visible_candidate_not_verified' if presented_facts.intersection(fact_ids)
+                                else 'omitted_by_input_budget', 'semantic_verified': False})
         if material.get('question_protocol') != PROTOCOL:
             continue
-        visible = next((r for r in presented if r.get('material_id') == material.get('material_id')), None)
         for candidate in material.get('question_candidates', []):
             marker = f"[PDF{candidate['pdf_page']} {_label(candidate['question_id'])}]"
             is_visible = bool(visible and (marker in visible['excerpt'] or

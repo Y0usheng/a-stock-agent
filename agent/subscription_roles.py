@@ -73,13 +73,14 @@ def _pick(row: dict, keys: tuple, text_limit: int = 300) -> dict:
 
 
 def current_materials(rows):
-    questions = [r for r in rows if r.get('question_protocol')]
+    questions = [r for r in rows if r.get('question_protocol') or r.get('operating_table_protocol')]
     if questions:
         # Whole question packs replace keyword-rich but irrelevant introductions.
         selected = []
         for kind in ('annual', 'interim'):
             group = sorted((r for r in questions if r.get('document_type') == kind),
-                           key=lambda r: (str(r.get('published_at', '')), str(r.get('first_seen_at', ''))), reverse=True)
+                           key=lambda r: (str(r.get('published_at', '')), bool(r.get('operating_table_protocol')),
+                                          str(r.get('first_seen_at', ''))), reverse=True)
             if group:
                 selected.append(group[0])
         numeric = sorted((r for r in rows if r.get('numeric_facts')),
@@ -90,7 +91,8 @@ def current_materials(rows):
                 selected.append(row)
         from agent.research_tasks import task_materials
         covered = {key for r in selected for key in r.get('task_ids', [])}
-        uncovered = [r for r in rows if set(r.get('task_ids', [])) - covered and r.get('unit_context_present') is not False]
+        uncovered = [r for r in rows if set(r.get('task_ids', [])) - covered
+                     and r.get('unit_context_present') is not False and not r.get('operating_table_protocol')]
         selected.extend(task_materials(uncovered, 1))
         return selected
     selected = []
@@ -120,6 +122,8 @@ def current_materials(rows):
 
 def material_excerpt(row, limit):
     """Select a contiguous source window, never a generated business summary."""
+    if row.get('operating_table_protocol'):
+        return row['excerpt'] if len(row['excerpt']) <= limit else ''
     if row.get('question_protocol'):
         from agent.research_retrieval import compact_question_excerpt
         return compact_question_excerpt(row, limit)
@@ -206,10 +210,13 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
                         text_limit = 650 // max(1, sum(not r.get('numeric_facts') for r in chosen))
                 if compact and row.get('numeric_facts'):
                     text_limit = 650  # Keep whole bound financial rows ahead of incidental prose.
-                if row.get('question_protocol'):
+                if row.get('question_protocol') or row.get('operating_table_protocol'):
                     text_limit = min(len(row['excerpt']), 650)  # Retain whole windows within the hard presentation bound.
                 item = _pick(row, ("symbol", "material_id", "title", "url", "published_at", "first_seen_at", "expires_at", "data_source", "data_quality", "locator", "report_period", "excerpt", "pdf_sha256", "page_text_hash", "extraction_status", "page_excerpt_complete", "document_type", "capture_protocol", "unit_context_present"), text_limit=text_limit)
                 item["excerpt"] = material_excerpt(row, text_limit)
+                if row.get('operating_table_protocol'):
+                    for key in ('operating_table_protocol', 'operating_table_scopes', 'task_ids'):
+                        item[key] = deepcopy(row.get(key, []))
                 if row.get('question_protocol'):
                     for key in ('question_protocol', 'question_candidates', 'question_visible', 'question_unmatched'):
                         item[key] = deepcopy(row.get(key, []))
@@ -399,8 +406,11 @@ class SubscriptionRoles:
                 analyst_input = json.loads(input)
                 payload["input"] = {role: json.loads(text)["claims"] for role, text in analyst_input.items()}
                 if compact:
+                    covered_tasks = {task_id for row in payload['source_coverage']
+                                     for task_id, status in row['questions'].items()
+                                     if status == 'visible_candidate_not_verified'}
                     tasks = sorted(payload['research_tasks'], key=lambda task: (
-                        not task['task_id'].startswith('gap_'), task['review_by']))
+                        not task['task_id'].startswith('gap_'), task['task_id'] not in covered_tasks, task['review_by']))
                     chosen_tasks = [row for symbol in context['symbols'] for row in [t for t in tasks if t['symbol']==symbol][:4]]
                     payload.pop('past_predictions', None)
                     opportunity = payload['opportunity_context']

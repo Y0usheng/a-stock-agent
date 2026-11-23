@@ -56,9 +56,10 @@ def select_materials(rows, limit=4):
     for category in ("business", "financials", "industry"):
         candidates = [item for item in rows if category in item["categories"]]
         if category == 'business':
-            questions = [r for r in candidates if r.get('question_protocol')]
+            questions = [r for r in candidates if r.get('question_protocol') or r.get('operating_table_protocol')]
             if questions:
-                questions.sort(key=lambda r: (str(r.get('published_at', '')), str(r.get('first_seen_at', ''))), reverse=True)
+                questions.sort(key=lambda r: (str(r.get('published_at', '')), bool(r.get('operating_table_protocol')),
+                                              str(r.get('first_seen_at', ''))), reverse=True)
                 for kind in ('annual', 'interim'):
                     row = next((r for r in questions if r.get('document_type') == kind), None)
                     if row and row not in selected:

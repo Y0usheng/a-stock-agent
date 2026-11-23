@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agent.research_retrieval import (question_material, compact_question_excerpt, coverage, coverage_summary)
+from agent.research_retrieval import (_operating_sections, question_material, compact_question_excerpt, coverage, coverage_summary)
 from agent.subscription_roles import export_paper_context, current_materials, SubscriptionRoles
 from agent.investment import select_materials
 from evals.experiments import canonical_hash
@@ -18,6 +18,20 @@ def pages(texts):
 
 
 class ResearchSourceTests(unittest.TestCase):
+    def test_operating_table_keeps_industry_and_product_scope_and_rejects_incomplete_rows(self):
+        grid = [
+            ['主营业务分行业情况', '', '', ''],
+            ['分行业', '营业收入', '营业成本', '毛利率（%）'],
+            ['行业一', '100', '80', '20.00'],
+            ['主营业务分产品情况', '', '', ''],
+            ['分产品', '营业收入', '营业成本', '毛利率（%）'],
+            ['产品一', '200', '190', '5.00'],
+        ]
+        self.assertEqual(list(_operating_sections(grid)),
+                         [('行业', [grid[2]]), ('产品', [grid[-1]])])
+        grid[-1][2] = ''
+        self.assertEqual(list(_operating_sections(grid)), [('行业', [grid[2]])])
+
     def test_bank_question_aliases_select_actual_risk_facts_not_speech_or_regulatory_minimum(self):
         extracted = pages(['600036 2026年第三季度报告',
             '董事长致辞\n主要风险 净息差 不良贷款率 核心一级资本充足率。',

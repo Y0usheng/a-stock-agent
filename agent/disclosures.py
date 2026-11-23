@@ -16,7 +16,7 @@ from config import DATA_DIR, MARKETS, ROOT
 from evals.experiments import canonical_hash
 from servers.data_quality import event_time
 
-VERSION = "controlled-pdf-capture-v9"
+VERSION = "controlled-pdf-capture-v10"
 TEXT_PROTOCOL = "pymupdf-sorted-v1"
 HOME = DATA_DIR / "disclosures"
 MAX_PDF = 80_000_000
@@ -276,12 +276,13 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
             receipt["errors"].append({"symbol": symbol, "reason": "total_budget_exhausted"})
             continue
         stage = "index"
-        from agent.research_tasks import FINAL
+        from agent.research_tasks import FINAL, financial_task_matches
         tasks = [row for row in book.tasks() if row.get("symbol") == symbol and row.get('status') not in FINAL]
         # Bounded source presentation rotates without increasing research calls.
         if len(tasks) > 3:
             shift = event_time(cutoff, 'cn').date().toordinal()*3 % len(tasks)
             tasks = tasks[shift:] + tasks[:shift]
+        tasks = tasks[:4]
         captured = []
         if not tasks:
             tasks = [{"category": category, "what_to_fetch": " ".join(terms)} for category, terms in TASK_TERMS.items()]
@@ -335,10 +336,24 @@ def collect(symbols, *, book=None, root=HOME, budget_seconds=90, cutoff=None):
                     from agent.financial_inputs import make_material
                     financial = make_material(document, extracted)
                     if financial:
+                        matches = financial_task_matches(financial['numeric_facts'], tasks)
+                        financial.update(task_ids=list(matches), task_facts=matches)
                         passages.append({**financial, 'capture_protocol': VERSION})
+                    from agent.research_retrieval import TABLE_REQUESTS, operating_breakdown, validate_windows
+                    if deadline - monotonic() >= 3:
+                        try:
+                            operating = operating_breakdown(document, extracted, pdf_path)
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            operating = None
+                            receipt["errors"].append({"symbol": symbol, "announcement_id": document["announcement_id"],
+                                "reason": type(exc).__name__ + ": operating_table_capture_failed", "stage": "operating_table"})
+                        if operating:
+                            operating['capture_protocol'] = VERSION
+                            operating['task_ids'] = [task['task_id'] for task in tasks if task.get('task_id')
+                                and any(term in task.get('what_to_fetch', '') for term in TABLE_REQUESTS)]
+                            passages.append(operating)
                     if not passages:
                         raise ValueError('没有可用业务或财务选段，不能把下载成功记作研究资料齐备')
-                    from agent.research_retrieval import validate_windows
                     for passage in passages:
                         validate_windows(passage, extracted)
                     stored = [book.add_material({**passage, "pdf_sha256": digest, "first_downloaded_at": capture["first_downloaded_at"]}) for passage in passages]
