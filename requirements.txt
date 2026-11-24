@@ -4,6 +4,7 @@ pandas>=2.0,<4.0
 # AKShare 1.20.41+ renamed market, stock-history and calendar interfaces.
 akshare>=1.14,<1.20.41
 yfinance>=0.2.40,<2.0
+pandas-market-calendars>=5.0,<6
 flask>=3.0,<4.0
 langgraph>=1.0,<2.0
 langgraph-checkpoint-sqlite>=3.0,<4.0
