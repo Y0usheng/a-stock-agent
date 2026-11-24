@@ -75,7 +75,7 @@ def _quality(row):
     return row.get("data_quality", "provider_observation")
 
 
-def _record(kind, row, market, day, allow_synthetic, information_cutoff_at=None):
+def _record(kind, row, market, day, allow_synthetic, information_cutoff_at=None, regular_close_at=None):
     payload = deepcopy(row)
     source = str(row.get("source") or row.get("data_source") or "").strip()
     url = str(row.get("url") or "")
@@ -91,7 +91,8 @@ def _record(kind, row, market, day, allow_synthetic, information_cutoff_at=None)
     timestamp = published if kind in {"news", "fundamentals", "company_document"} else row.get("date")
     if kind in {"market_snapshot", "price_history"}:
         try:
-            available = market_close(str(timestamp), market)
+            available = (event_time(regular_close_at, market) if regular_close_at and timestamp == day
+                         else market_close(str(timestamp), market))
         except (ValueError, TypeError):
             available = None
     elif timestamp:
@@ -137,6 +138,11 @@ def _record(kind, row, market, day, allow_synthetic, information_cutoff_at=None)
                   host == "sse.com.cn" or host.endswith(".sse.com.cn") or
                   host == "szse.cn" or host.endswith(".szse.cn") or
                   host == "sec.gov" or host.endswith(".sec.gov"))
+    issuer_communication = False
+    if market == "us" and kind == "news" and regular_close_at:
+        from servers.us_research_sources import ISSUER_HOSTS, NVIDIA_BLOG
+        disclosure = disclosure or host in ISSUER_HOSTS
+        issuer_communication = host == NVIDIA_BLOG
     # 获取时间保留用于审计，但不使相同内容的证据 ID 随抓取次数改变。
     identity_payload = {key: value for key, value in payload.items()
                         if key not in {"collected_at", "first_seen_at", "ingested_at"}}
@@ -144,6 +150,7 @@ def _record(kind, row, market, day, allow_synthetic, information_cutoff_at=None)
     return {"evidence_id": "ev_" + content_hash[:24], "kind": kind, "market": market,
         "symbol": row.get("symbol"), "as_of_date": day, "source": source, "url": url,
         "source_tier": "disclosure_reference" if disclosure and kind in {"news", "company_document"} else
+                       "issuer_communication" if issuer_communication else
                        "media_report" if kind == "news" else "provider_values",
         "content_scope": "title_and_excerpt" if kind == "news" else "frozen_fields",
         "published_at": published, "event_occurred_at": row.get("event_occurred_at"),
@@ -157,6 +164,10 @@ def _record(kind, row, market, day, allow_synthetic, information_cutoff_at=None)
 def build_catalog(context, market, *, allow_synthetic=False):
     day = date.fromisoformat(context["date"]).isoformat()
     symbols = set(context["symbols"])
+    cutoff = context.get("timing", {}).get("information_cutoff_at") or context.get("research_cutoff_at")
+    regular_close = context.get("regular_close_at") if context.get("research_cutoff_at") and market == "us" else None
+    if regular_close and str(event_time(regular_close, market).date()) != day:
+        raise ValueError("交易所收盘日期与行情日不一致")
     rows = []
     for kind, entries in (("market_snapshot", context["snapshot"]),
                           ("fundamentals", context["fundamentals"]),
@@ -166,17 +177,20 @@ def build_catalog(context, market, *, allow_synthetic=False):
                                     for event in candidate.get("top_events", [])])):
         for row in entries:
             if row.get("symbol") in symbols:
-                rows.append(_record(kind, row, market, day, allow_synthetic, context.get("timing", {}).get("information_cutoff_at")))
+                rows.append(_record(kind, row, market, day, allow_synthetic, cutoff, regular_close))
     rows = sorted({row["evidence_id"]: row for row in rows}.values(), key=lambda row: row["evidence_id"])
     catalog = {"version": EVIDENCE_VERSION, "market": market, "as_of_date": day,
         "visibility_policy": "publication_by_close; later_collection_is_explicitly_flagged",
         "semantic_support_verified": False, "allow_synthetic": allow_synthetic,
         "records": rows, "fingerprint": canonical_hash(rows)}
-    if context.get("timing"):
-        cutoff = event_time(context["timing"]["information_cutoff_at"], market)
-        if cutoff < market_close(day, market):
+    if cutoff:
+        cutoff = event_time(cutoff, market)
+        if cutoff < (event_time(regular_close, market) if regular_close else market_close(day, market)):
             raise ValueError("收盘后协议的信息截止不能早于行情收盘")
-        catalog.update(information_cutoff_at=cutoff.isoformat(), visibility_policy="observed_and_published_by_information_cutoff; future_session_execution")
+        policy = "research_only" if context.get("research_cutoff_at") else "future_session_execution"
+        catalog.update(information_cutoff_at=cutoff.isoformat(), visibility_policy=f"observed_and_published_by_information_cutoff; {policy}")
+        if regular_close:
+            catalog["regular_close_at"] = regular_close
     return catalog
 
 
@@ -186,7 +200,8 @@ def validate_catalog(catalog):
     ids = set()
     for record in catalog["records"]:
         expected = _record(record["kind"], record["payload"], catalog["market"],
-                           catalog["as_of_date"], catalog["allow_synthetic"], catalog.get("information_cutoff_at"))
+                           catalog["as_of_date"], catalog["allow_synthetic"], catalog.get("information_cutoff_at"),
+                           catalog.get("regular_close_at"))
         if record != expected or record["evidence_id"] in ids:
             raise ValueError("证据内容、时间、可用性或 ID 被改写")
         ids.add(record["evidence_id"])

@@ -12,6 +12,10 @@ from config import DEFAULT_PROMPT_VERSION
 
 
 PROMPT_VERSIONS = {
+    "manager-us-focus-v1": {
+        "description": "美股收盘后只读研究；基于发行人公告、真实行情与独立风险评审。",
+        "suffix": "",
+    },
     "manager-long-v3": {
         "description": "AI自主模拟排单；复盘已到期结果，经时间验证后启用置信度校准。",
         "suffix": "",

@@ -178,17 +178,23 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
             continue
         item = _pick(candidate, ("symbol", "article_count"))
         # 链接/哈希/时间戳不得按正文长度截断。
-        news_limit = 1 if context.get("execution_policy") == "autonomous-paper-execution-v1" else 2
+        if context.get("research_cutoff_at"):
+            news_limit = 3
+        else:
+            news_limit = 1 if context.get("execution_policy") == "autonomous-paper-execution-v1" else 2
         item["top_events"] = [_pick(row, EVENT_FIELDS, text_limit=1000) for row in candidate.get("top_events", [])[:news_limit]]
         news.append(item)
     # 仅保留以前模型的方向/概率，无历史理由、成交备注或用户自由文本。
     memory = context.get("memory", {})
     past_predictions = [_pick(row, ("date", "symbol", "direction", "confidence", "horizon_days"))
                         for row in memory.get("recent_predictions", [])[-12:]]
+    snapshot_fields = SNAPSHOT_FIELDS + ("price_basis",) if context.get("research_cutoff_at") else SNAPSHOT_FIELDS
     result = {"date": context["date"], "symbols": list(context["symbols"]),
-        "snapshot": [_pick(row, SNAPSHOT_FIELDS) for row in context["snapshot"]],
+        "snapshot": [_pick(row, snapshot_fields) for row in context["snapshot"]],
         "fundamentals": [_pick(row, FUNDAMENTAL_FIELDS) for row in context["fundamentals"]],
         "news": news, "paper_account": paper, "past_predictions": past_predictions}
+    if context.get("research_cutoff_at"):
+        result.update(research_cutoff_at=context["research_cutoff_at"], regular_close_at=context["regular_close_at"])
     if long_term:
         research = context.get("investment_context", {})
         if context.get("timing"):

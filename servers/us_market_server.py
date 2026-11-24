@@ -107,7 +107,10 @@ def get_history(symbol: str, days: int = 30) -> list[dict]:
 @mcp.tool()
 def get_indicators(symbol: str) -> dict:
     """计算技术指标:MA5/MA20/MA60、RSI14、MACD。用于判断趋势与超买超卖"""
-    df = _fetch_history(symbol, 120)
+    return indicators(symbol, _fetch_history(symbol, 120), _data_source)
+
+
+def indicators(symbol, df, source):
     close = df["close"]
     ma5, ma20 = close.rolling(5).mean().iloc[-1], close.rolling(20).mean().iloc[-1]
     ma60 = close.rolling(60).mean().iloc[-1]
@@ -132,7 +135,7 @@ def get_indicators(symbol: str) -> dict:
         "macd_dif": round(float(dif.iloc[-1]), 3),
         "macd_dea": round(float(dea.iloc[-1]), 3),
         "above_ma20": bool(close.iloc[-1] > ma20),
-        "data_source": _data_source,
+        "data_source": source,
     }
 
 

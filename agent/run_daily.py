@@ -279,7 +279,8 @@ async def execute_sdk_plan(host: McpHost, result: dict, prices: dict[str, float]
 async def run_shadow(host: McpHost, snapshot: list[dict], as_of_date: str,
                      mock: bool, manager_provider: str | None, risk_provider: str | None,
                      prompt_versions: list[str | None], force: bool = False,
-                     frameworks: list[str] | None = None, model_access: str = "api") -> dict:
+                     frameworks: list[str] | None = None, model_access: str = "api",
+                     fundamentals: list[dict] | None = None) -> dict:
     if not mock and model_access == "subscription" and any(
             framework != "langgraph" for framework in frameworks or ["sdk"]):
         raise ValueError("订阅模式只支持 langgraph，不能自动改用 API SDK")
@@ -287,7 +288,8 @@ async def run_shadow(host: McpHost, snapshot: list[dict], as_of_date: str,
     account = await host.call("get_account", {"current_prices": prices})
     trades = await host.call("get_trades", {"limit": 20})
     memory = build_memory_snapshot(host.market, as_of_date, LOG_DIR, trades)
-    fundamentals = await host.call("candidate_fundamentals", {"symbols": host.active_symbols})
+    if fundamentals is None:
+        fundamentals = await host.call("candidate_fundamentals", {"symbols": host.active_symbols})
     reader = AnalysisHost(host, snapshot, fundamentals, account, trades)
     completed = []
     from itertools import product
@@ -378,8 +380,21 @@ async def run_market(
     reject_plan: str | None = None,
     model_access: str | None = None,
     research_symbols: list[str] | None = None,
+    us_focus: bool = False,
 ):
     model_access = resolve_model_access(model_access)
+    if us_focus:
+        if (market != "us" or not shadow or mock or _offline_enabled() or framework != "langgraph"
+                or model_access != "subscription" or any((approve_plan, reject_plan, force,
+                    prompt_version, compare_prompts, compare_frameworks, research_symbols))):
+            raise ValueError("美股收盘研究只支持本机订阅的真实只读模式")
+        from agent.us_focus import session_gate, run_focus
+        day, close, reason = session_gate()
+        if reason:
+            print("美股收盘研究跳过:", day, reason)
+            return {"status": "skipped", "reason": reason, "session": day}
+        async with McpHost("us") as host:
+            return await run_focus(host, day, close)
     from agent.investment import is_long, PROMPT_VERSION
     if prompt_version is None and market == "cn" and not mock and model_access == "subscription":
         prompt_version = compare_prompts[0] if compare_prompts else os.environ.get("ASTOCK_PROMPT_VERSION") or PROMPT_VERSION
@@ -594,6 +609,7 @@ async def main():
     parser.add_argument("--mock", action="store_true", help="规则策略,无需 API key")
     parser.add_argument("--offline", action="store_true", help="强制使用可复现离线行情")
     parser.add_argument("--shadow", action="store_true", help="只分析不下单，单独保存各变体日志")
+    parser.add_argument("--us-focus", action="store_true", help="美股收盘后发行人公告与同业研究，只支持--market us --shadow")
     parser.add_argument("--research-symbols", nargs="+", help="A股shadow研究用的固定受控股票池")
     parser.add_argument("--model-access", choices=["subscription", "api"], default=None,
                         help="默认 subscription，复用官方 ChatGPT 登录；API 必须显式选择")
@@ -652,7 +668,8 @@ async def main():
         "prompt_version": args.prompt_version, "force": args.force, "shadow": args.shadow,
         "compare_prompts": args.compare_prompts, "framework": args.framework,
         "compare_frameworks": args.compare_frameworks, "approve_plan": args.approve_plan,
-        "reject_plan": args.reject_plan, "model_access": args.model_access, "research_symbols": args.research_symbols})
+        "reject_plan": args.reject_plan, "model_access": args.model_access, "research_symbols": args.research_symbols,
+        "us_focus": args.us_focus})
     if any(item["status"] == "failed" for item in results):
         raise SystemExit(1)
 

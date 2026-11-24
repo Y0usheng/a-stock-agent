@@ -35,6 +35,11 @@ class GraphState(TypedDict, total=False):
 
 
 def manager_instructions(market, as_of_date, symbols, version=None):
+    if version == "manager-us-focus-v1":
+        return (manager_instructions(market, as_of_date, symbols, "manager-v2") +
+                "\n美股收盘后只读研究：交易判断只是假设，不提交交易。把当日价格反应与一至三年的业务影响分开。"
+                "逐股指出已披露事实、待验证因果机制、反证、估值证据缺口及下次复核条件。"
+                "脱离公司公告不能把价格上涨归因于空头回补。方向预测只用于短期观察。")
     if version == "manager-long-v3":
         return manager_instructions(market, as_of_date, symbols, "manager-long-v2").replace("未确认不成交", "独立风控与宿主检查通过才自动排定模拟成交") + (
             "\n本轮为AI自主模拟：独立风控与宿主硬性规则通过后自动排定未来模拟计划，不要求用户逐笔确认。"
@@ -199,6 +204,9 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         "account": await host.call("get_account", {}), "memory": memory,
         "news": host.news_screen,
         "fundamentals": await host.call("candidate_fundamentals", {"symbols": host.active_symbols})}
+    if prompt_version == "manager-us-focus-v1":
+        current_context["research_cutoff_at"] = host.news_screen["information_cutoff_at"]
+        current_context["regular_close_at"] = host.news_screen["regular_close_at"]
     if getattr(host, "timing", None):
         current_context["timing"] = deepcopy(host.timing)
     if getattr(host, "learning_context", None):
