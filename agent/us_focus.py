@@ -9,7 +9,7 @@ from servers.data_quality import market_zone
 from servers.us_research_sources import ISSUER_FEEDS, ISSUER_SOURCES, PRICE_SOURCE, issuer_releases, nasdaq_bars
 
 SYMBOLS = ('NVDA', 'AMD', 'MSFT')
-PROMPT_VERSION = 'manager-us-focus-v2'
+PROMPT_VERSION = 'manager-us-focus-v3'
 
 
 def _event_priority(row):

@@ -12,6 +12,10 @@ from config import DEFAULT_PROMPT_VERSION
 
 
 PROMPT_VERSIONS = {
+    "manager-us-focus-v3": {
+        "description": "开盘前预测与延迟评分，技术面由宿主计算，严格区分支持及反证。",
+        "suffix": "",
+    },
     "manager-us-focus-v2": {
         "description": "目标交易日开盘前冻结美股方向预测，真实收盘价到齐后复盘。",
         "suffix": "",
