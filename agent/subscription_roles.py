@@ -162,16 +162,19 @@ def bounded_text_schema(schema):
 def export_paper_context(context: dict, market: str, long_term=False) -> dict:
     """禁止通用账户对象、自由文本记忆及无关字段进入订阅输入。"""
     account = context["account"]
-    if (account.get("market") != market or account.get("currency") != MARKETS[market]["currency"]
-            or account.get("initial_cash") != MARKETS[market]["initial_cash"]):
-        raise ValueError("订阅输入仅支持本项目生成的虚拟模拟账本")
-    paper = _pick(account, ("cash", "total_assets", "initial_cash",'cash_receivable'))
-    if account.get('corporate_rights'):
-        paper['corporate_rights']=[_pick(r,('symbol','cash_receivable','bonus_shares','pay_date','listing_date')) for r in account['corporate_rights']]
-        paper['equity_basis']='股息税前；应收现金不可用于买入，未上市股份不可卖出'
-    paper["kind"] = "local_virtual_paper_ledger"
-    paper["positions"] = [_pick(row, ("symbol", "shares", "avg_cost", "last_buy_date"))
-                          for row in account.get("positions", [])]
+    paper = None
+    if not context.get("forecast") or account is not None:
+        if (not isinstance(account, dict) or account.get("market") != market
+                or account.get("currency") != MARKETS[market]["currency"]
+                or account.get("initial_cash") != MARKETS[market]["initial_cash"]):
+            raise ValueError("订阅输入仅支持本项目生成的虚拟模拟账本")
+        paper = _pick(account, ("cash", "total_assets", "initial_cash",'cash_receivable'))
+        if account.get('corporate_rights'):
+            paper['corporate_rights']=[_pick(r,('symbol','cash_receivable','bonus_shares','pay_date','listing_date')) for r in account['corporate_rights']]
+            paper['equity_basis']='股息税前；应收现金不可用于买入，未上市股份不可卖出'
+        paper["kind"] = "local_virtual_paper_ledger"
+        paper["positions"] = [_pick(row, ("symbol", "shares", "avg_cost", "last_buy_date"))
+                              for row in account.get("positions", [])]
     news = []
     for candidate in context.get("news", {}).get("candidates", []):
         if candidate.get("symbol") not in context["symbols"]:
@@ -195,6 +198,9 @@ def export_paper_context(context: dict, market: str, long_term=False) -> dict:
         "news": news, "paper_account": paper, "past_predictions": past_predictions}
     if context.get("research_cutoff_at"):
         result.update(research_cutoff_at=context["research_cutoff_at"], regular_close_at=context["regular_close_at"])
+    if context.get("forecast"):
+        result["forecast"] = deepcopy(context["forecast"])
+        result["forecast_feedback"] = deepcopy(context["forecast_feedback"])
     if long_term:
         research = context.get("investment_context", {})
         if context.get("timing"):
@@ -354,10 +360,15 @@ class SubscriptionRoles:
             "unavailable_evidence": [{key: record[key] for key in ("evidence_id", "symbol", "kind", "issues")}
                                       for record in records if not record["eligible"]]}
         if name in {"investment-manager", "risk-manager"}:
-            payload["paper_account"] = context["paper_account"]
-            payload["past_predictions"] = context["past_predictions"]
+            if not context.get("forecast"):
+                payload["paper_account"] = context["paper_account"]
+                payload["past_predictions"] = context["past_predictions"]
             if context.get("learning_context"):
                 payload["learning_context"] = context["learning_context"]
+        if context.get("forecast"):
+            payload["forecast"] = context["forecast"]
+            if name == "investment-manager":
+                payload["forecast_feedback"] = context["forecast_feedback"]
         if self.long_term:
             payload.update(previous_cases=context["previous_cases"], research_tasks=context["research_tasks"],
                            auxiliary_gaps=context["auxiliary_gaps"], investment_policy=context["investment_policy"])
@@ -463,6 +474,8 @@ class SubscriptionRoles:
                 instructions += "你只输出本角色研究结论，不使用经理：、风控：等角色归属前缀，不宣称任何审批状态。"
         if context.get("timing"):
             instructions = AFTER_CLOSE_EVIDENCE_INSTRUCTIONS
+        if context.get("forecast"):
+            instructions += "只读预测无账户，决策全部为 HOLD、股数为0。风控评价证据和不确定性。"
         if self.slots:
             visible = {r['evidence_id'] for r in payload['evidence']}
             payload = rewrite_references(payload, {ref:slot for ref,slot in self.slots.items() if ref in visible})
@@ -475,6 +488,10 @@ class SubscriptionRoles:
         schema = RESULT_EVIDENCE_SCHEMA if name == "investment-manager" else RISK_SCHEMA if name == "risk-manager" else SUMMARY_SCHEMA
         if self.long_term and name == "investment-manager":
             schema = result_schema(schema)
+        if context.get("forecast") and name == "investment-manager":
+            schema = deepcopy(schema)
+            schema["properties"]["predictions"]["items"]["properties"]["horizon_days"]["enum"] = [
+                context["forecast"]["horizon_days"]]
         if context.get("timing"):
             schema = derived_link_schema(schema)
             if name in {"technical-analyst", "fundamental-analyst"}:

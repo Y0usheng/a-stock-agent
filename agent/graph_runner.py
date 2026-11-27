@@ -35,6 +35,14 @@ class GraphState(TypedDict, total=False):
 
 
 def manager_instructions(market, as_of_date, symbols, version=None):
+    if version == "manager-us-focus-v2":
+        base = manager_instructions(market, as_of_date, symbols, "manager-us-focus-v1")
+        return base.replace("美股收盘后只读研究", "美股目标日开盘前只读研究").replace(
+            "5 个交易日预测。", "按 forecast 指定的目标交易日与 horizon_days 预测。") + (
+            "\n方向指目标日收盘价相对 references 中冻结参考收盘价的方向。"
+            "最近一次共同收盘价可能晚一个交易日，须点明这一限制。"
+            "forecast_feedback 只含预测截止前已按真实收盘评分的历史结果，用于反思误差与置信度，"
+            "不得作为公司披露或把样本不足解读为验证成功。")
     if version == "manager-us-focus-v1":
         return (manager_instructions(market, as_of_date, symbols, "manager-v2") +
                 "\n美股收盘后只读研究：交易判断只是假设，不提交交易。把当日价格反应与一至三年的业务影响分开。"
@@ -82,7 +90,7 @@ def build_graph_manifest(market, day, symbols, version=None, model_access="api")
 
 
 def build_decision_graph(call_role, market: str, symbols: set[str], *, checkpointer=None,
-                         require_confirmation: bool = True, capture_metadata=None):
+                         require_confirmation: bool = True, capture_metadata=None, prediction_horizon=None):
     """节点只生成决策，不拥有账户写入工具；可以注入角色调用做离线验收。"""
     from langgraph.graph import StateGraph, START, END
     from langgraph.types import interrupt
@@ -96,7 +104,9 @@ def build_decision_graph(call_role, market: str, symbols: set[str], *, checkpoin
     async def plan(state):
         draft = parse_agent_result(await call_role("investment-manager", _json_output({
             "technical": state["technical"], "fundamental": state["fundamental"]})))
-        validate_decision_result(draft, market, expected_symbols=symbols)
+        validate_decision_result(draft, market, expected_symbols=symbols, prediction_horizon=prediction_horizon)
+        if prediction_horizon is not None and any(row["action"] != "HOLD" for row in draft["decisions"]):
+            raise ValueError("美股方向研究不得产生买卖计划")
         return {"draft": draft}
 
     async def risk(state):
@@ -119,7 +129,7 @@ def build_decision_graph(call_role, market: str, symbols: set[str], *, checkpoin
         result["analyst_views"] = {"technical": state["technical"],
                                    "fundamental": state["fundamental"], "risk": review["summary"]}
         validate_risk_approval(result, market, symbols)
-        validate_decision_result(result, market, expected_symbols=symbols)
+        validate_decision_result(result, market, expected_symbols=symbols, prediction_horizon=prediction_horizon)
         saved = capture_metadata() if capture_metadata else {}
         if "evidence_audit" in saved:
             result["evidence_audit"] = saved.pop("evidence_audit")
@@ -204,9 +214,12 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         "account": await host.call("get_account", {}), "memory": memory,
         "news": host.news_screen,
         "fundamentals": await host.call("candidate_fundamentals", {"symbols": host.active_symbols})}
-    if prompt_version == "manager-us-focus-v1":
+    if prompt_version in {"manager-us-focus-v1", "manager-us-focus-v2"}:
         current_context["research_cutoff_at"] = host.news_screen["information_cutoff_at"]
         current_context["regular_close_at"] = host.news_screen["regular_close_at"]
+    if prompt_version == "manager-us-focus-v2":
+        current_context["forecast"] = host.news_screen["forecast"]
+        current_context["forecast_feedback"] = host.news_screen["forecast_feedback"]
     if getattr(host, "timing", None):
         current_context["timing"] = deepcopy(host.timing)
     if getattr(host, "learning_context", None):
@@ -275,7 +288,8 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
     try:
         async with AsyncSqliteSaver.from_conn_string(str(path)) as saver:
             graph = build_decision_graph(call_role, market, set(host.active_symbols),
-                checkpointer=saver, require_confirmation=require_confirmation, capture_metadata=capture_metadata)
+                checkpointer=saver, require_confirmation=require_confirmation, capture_metadata=capture_metadata,
+                prediction_horizon=current_context.get("forecast", {}).get("horizon_days"))
             previous = await graph.aget_state(config)
             if approve_plan or reject_plan:
                 if not previous.interrupts:

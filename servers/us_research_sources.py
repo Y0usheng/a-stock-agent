@@ -36,7 +36,7 @@ def _public_body(url, *, params=None, size=1_000_000):
         return bytes(data)
 
 
-def parse_nasdaq_bars(value, symbol, session, days=120):
+def parse_nasdaq_bars(value, symbol, session, days=120, *, require_session=True):
     data = value.get('data') or {}
     if data.get('symbol') != symbol:
         raise ValueError('Nasdaq symbol mismatch')
@@ -53,19 +53,19 @@ def parse_nasdaq_bars(value, symbol, session, days=120):
             raise ValueError('Invalid Nasdaq daily bar')
         result[day] = {'date': day, **prices, 'volume': volume}
     ordered = [result[day] for day in sorted(result)]
-    if len(ordered) < 60 or ordered[-1]['date'] != session:
+    if len(ordered) < 60 or (require_session and ordered[-1]['date'] != session):
         raise ValueError('Nasdaq prices do not cover the required closed trading session')
     return ordered[-days:]
 
 
-def nasdaq_bars(symbol, session):
+def nasdaq_bars(symbol, session, *, require_session=True):
     from config import MARKETS
     if symbol not in {row['symbol'] for row in MARKETS['us']['candidate_universe']}:
         raise ValueError('Symbol outside the US research universe')
     start = date.fromisoformat(session) - timedelta(days=365)
     params = {'assetclass': 'stocks', 'fromdate': start.isoformat(), 'todate': session, 'limit': 365}
     data = json.loads(_public_body(f'https://api.nasdaq.com/api/quote/{symbol}/historical', params=params))
-    return parse_nasdaq_bars(data, symbol, session)
+    return parse_nasdaq_bars(data, symbol, session, require_session=require_session)
 
 
 def _plain(text, limit):
