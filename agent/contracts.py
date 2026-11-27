@@ -93,7 +93,8 @@ def validate_risk_approval(result: dict, market: str,
 
 
 def validate_decision_result(result: dict, market: str, require_roles: bool = True,
-                             expected_symbols: set[str] | None = None) -> None:
+                             expected_symbols: set[str] | None = None,
+                             prediction_horizon: int | None = None) -> None:
     """拒绝不完整或越界的模型结果，避免污染日志和后续 Evals。"""
     if not isinstance(result, dict) or not result.get("summary"):
         raise ValueError("决策结果缺少 summary")
@@ -108,10 +109,12 @@ def validate_decision_result(result: dict, market: str, require_roles: bool = Tr
 
     predictions = result.get("predictions")
     _complete_rows(predictions, expected, "predictions")
+    from agent.investment import VERSION as INVESTMENT_VERSION
+    horizon = prediction_horizon
+    if horizon is None:
+        horizon = 252 if result.get("investment_policy") == INVESTMENT_VERSION else 5
     for item in predictions:
         confidence = item.get("confidence")
-        from agent.investment import VERSION as INVESTMENT_VERSION
-        horizon = 252 if result.get("investment_policy") == INVESTMENT_VERSION else 5
         if item.get("direction") not in {"up", "down", "flat"} or item.get("horizon_days") != horizon:
             raise ValueError(f"{item.get('symbol')} 预测方向或期限非法")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:

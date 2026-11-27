@@ -284,10 +284,23 @@ async def run_shadow(host: McpHost, snapshot: list[dict], as_of_date: str,
     if not mock and model_access == "subscription" and any(
             framework != "langgraph" for framework in frameworks or ["sdk"]):
         raise ValueError("订阅模式只支持 langgraph，不能自动改用 API SDK")
-    prices = {item["symbol"]: item["close"] for item in snapshot}
-    account = await host.call("get_account", {"current_prices": prices})
-    trades = await host.call("get_trades", {"limit": 20})
-    memory = build_memory_snapshot(host.market, as_of_date, LOG_DIR, trades)
+    forecast = host.news_screen.get("forecast") if host.market == "us" else None
+    if forecast:
+        from agent.us_forecast import forecast_path, validate_lock
+        from servers.data_quality import market_zone
+        if mock or force or model_access != "subscription" or frameworks != ["langgraph"] or len(prompt_versions) != 1:
+            raise ValueError("美股预测只接受一次真实只读研究")
+        forecast_log = forecast_path(forecast["target_session"])
+        if forecast_log.exists():
+            return {"status": "skipped", "reason": "forecast_exists", "log_path": str(forecast_log)}
+        validate_lock(forecast, datetime.now(market_zone("us")).isoformat())
+    if forecast:
+        account, trades, memory = None, [], {}
+    else:
+        prices = {item["symbol"]: item["close"] for item in snapshot}
+        account = await host.call("get_account", {"current_prices": prices})
+        trades = await host.call("get_trades", {"limit": 20})
+        memory = build_memory_snapshot(host.market, as_of_date, LOG_DIR, trades)
     if fundamentals is None:
         fundamentals = await host.call("candidate_fundamentals", {"symbols": host.active_symbols})
     reader = AnalysisHost(host, snapshot, fundamentals, account, trades)
@@ -320,7 +333,7 @@ async def run_shadow(host: McpHost, snapshot: list[dict], as_of_date: str,
                     host.market, as_of_date, host.active_symbols, version, model_access)
             else:
                 metadata["agent_sdk"]["budget"] = ModelBudget().report()
-        path = shadow_log_path(LOG_DIR, as_of_date, host.market, metadata)
+        path = forecast_log if forecast else shadow_log_path(LOG_DIR, as_of_date, host.market, metadata)
         if path.exists() and version == "manager-long-v1" and force:
             raise ValueError("长期论证同版本同日保留首次输出；请使用新版本而非覆盖")
         if path.exists() and not force:
@@ -336,7 +349,8 @@ async def run_shadow(host: McpHost, snapshot: list[dict], as_of_date: str,
                 result = await run_agent_sdk(reader, host.market, as_of_date, memory,
                                              manager_provider, risk_provider, version)
             validate_risk_approval(result, host.market, set(host.active_symbols))
-        validate_decision_result(result, host.market, expected_symbols=set(host.active_symbols))
+        validate_decision_result(result, host.market, expected_symbols=set(host.active_symbols),
+                                 prediction_horizon=forecast["horizon_days"] if forecast else None)
         dataset = reader.dataset(as_of_date, memory)
         result.update({key: value for key, value in metadata.items() if key != "agent_sdk"})
         result.update({
@@ -349,6 +363,14 @@ async def run_shadow(host: McpHost, snapshot: list[dict], as_of_date: str,
             "input_dataset": dataset, "dataset_fingerprint": canonical_hash(dataset),
             "execution": {"status": "analysis_only", "orders_submitted": 0},
         })
+        if forecast:
+            locked_at = datetime.now(market_zone("us")).isoformat()
+            validate_lock(forecast, locked_at)
+            result.update(us_forecast={**forecast, "locked_at": locked_at}, generated_at=locked_at,
+                          run_id=f"us:{forecast['target_session']}:shadow:us-forecast-v2")
+            write_log(path, result)
+            print(f"美股预测已冻结，待真实目标日收盘评分: {path}")
+            return {"status": "complete", "log_path": str(path)}
         write_log(path, result)
         completed.append((path, result))
         print(f"只分析完成，未提交订单: {path}")
@@ -388,13 +410,15 @@ async def run_market(
                 or model_access != "subscription" or any((approve_plan, reject_plan, force,
                     prompt_version, compare_prompts, compare_frameworks, research_symbols))):
             raise ValueError("美股收盘研究只支持本机订阅的真实只读模式")
-        from agent.us_focus import session_gate, run_focus
-        day, close, reason = session_gate()
+        from agent.us_focus import run_focus
+        from agent.us_forecast import forecast_window
+        from servers.data_quality import market_zone
+        now = datetime.now(market_zone("us"))
+        window, reason = forecast_window(now)
         if reason:
-            print("美股收盘研究跳过:", day, reason)
-            return {"status": "skipped", "reason": reason, "session": day}
-        async with McpHost("us") as host:
-            return await run_focus(host, day, close)
+            print("美股研究跳过:", now.date().isoformat(), reason)
+            return {"status": "skipped", "reason": reason, "session": now.date().isoformat()}
+        return await run_focus(McpHost("us"), window)
     from agent.investment import is_long, PROMPT_VERSION
     if prompt_version is None and market == "cn" and not mock and model_access == "subscription":
         prompt_version = compare_prompts[0] if compare_prompts else os.environ.get("ASTOCK_PROMPT_VERSION") or PROMPT_VERSION

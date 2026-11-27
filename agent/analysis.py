@@ -21,7 +21,7 @@ class AnalysisHost:
     """所有变体共用只读缓存，防止分析期间重复拉取不同的账户/基本面截面。"""
 
     def __init__(self, host, snapshot: list[dict], fundamentals: list[dict],
-                 account: dict, recent_trades: list[dict]):
+                 account: dict | None, recent_trades: list[dict]):
         self._host = host
         self.market = host.market
         self.active_symbols = list(host.active_symbols)

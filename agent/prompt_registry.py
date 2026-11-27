@@ -12,6 +12,10 @@ from config import DEFAULT_PROMPT_VERSION
 
 
 PROMPT_VERSIONS = {
+    "manager-us-focus-v2": {
+        "description": "目标交易日开盘前冻结美股方向预测，真实收盘价到齐后复盘。",
+        "suffix": "",
+    },
     "manager-us-focus-v1": {
         "description": "美股收盘后只读研究；基于发行人公告、真实行情与独立风险评审。",
         "suffix": "",
