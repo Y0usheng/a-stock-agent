@@ -3,11 +3,12 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from agent.evidence import build_catalog
 from agent.run_daily import run_market
+from agent.subscription_roles import SubscriptionRoles
 from agent.us_forecast import VERSION, feedback, forecast_path, forecast_window, reference_session, settle_forecasts, validate_lock
 from agent.analysis import write_log
 from evals.experiments import canonical_hash
@@ -15,6 +16,23 @@ from servers.us_research_sources import PRICE_SOURCE, parse_issuer_feed, parse_n
 
 
 class USFocusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_us_technical_role_uses_real_snapshot_without_account_or_model(self):
+        context = {'date': '2026-11-25', 'symbols': ['NVDA'], 'account': None,
+                   'research_cutoff_at': '2026-11-27T08:00:00-05:00',
+                   'regular_close_at': '2026-11-25T16:00:00-05:00',
+                   'snapshot': [{'symbol': 'NVDA', 'date': '2026-11-25', 'close': 149.30,
+                                 'volume': 100_000, 'data_source': PRICE_SOURCE}],
+                   'fundamentals': [], 'forecast': {'horizon_days': 1}, 'forecast_feedback': {}}
+        with patch('agent.subscription_roles.SubscriptionClient') as client:
+            client.return_value.complete = AsyncMock()
+            roles = SubscriptionRoles(context, 'us', '', 'test')
+            result = json.loads(await roles.call('technical-analyst', ''))
+            client.return_value.complete.assert_not_awaited()
+        evidence = result['claims'][0]['evidence']
+        self.assertEqual(len(evidence['supporting_ids']), 1)
+        self.assertEqual(evidence['contradicting_ids'], [])
+        self.assertIsNone(roles.context['paper_account'])
+
     def test_calendar_skips_thanksgiving_and_recognizes_early_close(self):
         zone = ZoneInfo('America/New_York')
         holiday = datetime(2026, 11, 26, 17, 30, tzinfo=zone)

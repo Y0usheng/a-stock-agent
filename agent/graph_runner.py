@@ -35,6 +35,10 @@ class GraphState(TypedDict, total=False):
 
 
 def manager_instructions(market, as_of_date, symbols, version=None):
+    if version == "manager-us-focus-v3":
+        return manager_instructions(market, as_of_date, symbols, "manager-us-focus-v2") + (
+            "\n只读研究没有账户。每个 decisions 条目填 HOLD、0 股及冻结参考价，"
+            "用 predictions 表达方向，用理由表达风险和长期业务判断。")
     if version == "manager-us-focus-v2":
         base = manager_instructions(market, as_of_date, symbols, "manager-us-focus-v1")
         return base.replace("美股收盘后只读研究", "美股目标日开盘前只读研究").replace(
@@ -214,10 +218,10 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         "account": await host.call("get_account", {}), "memory": memory,
         "news": host.news_screen,
         "fundamentals": await host.call("candidate_fundamentals", {"symbols": host.active_symbols})}
-    if prompt_version in {"manager-us-focus-v1", "manager-us-focus-v2"}:
+    if prompt_version in {"manager-us-focus-v1", "manager-us-focus-v2", "manager-us-focus-v3"}:
         current_context["research_cutoff_at"] = host.news_screen["information_cutoff_at"]
         current_context["regular_close_at"] = host.news_screen["regular_close_at"]
-    if prompt_version == "manager-us-focus-v2":
+    if prompt_version in {"manager-us-focus-v2", "manager-us-focus-v3"}:
         current_context["forecast"] = host.news_screen["forecast"]
         current_context["forecast_feedback"] = host.news_screen["forecast_feedback"]
     if getattr(host, "timing", None):
@@ -282,7 +286,7 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
         if subscription_roles is not None:
             captured["evidence_audit"] = subscription_roles.audit()
             captured["run_metadata"]["evidence_fingerprint"] = subscription_roles.catalog["fingerprint"]
-            if current_context.get("timing"):
+            if current_context.get("timing") or current_context.get("forecast"):
                 captured["run_metadata"]["role_sources"] = subscription_roles.audit()["role_sources"]
         return captured
     try:
@@ -322,6 +326,15 @@ async def run_agent_graph(host, market, as_of_date, memory, prompt_version=None,
                 "status": "failed", "error_type": type(exc).__name__, "failed_at": now().isoformat(), "orders_submitted": 0,
                 "timing": getattr(host, "timing", {}), "context_fingerprint": context_hash,
                 "raw_role_outputs": deepcopy(subscription_roles.raw_outputs), **capture_metadata()})
+        if prompt_version == "manager-us-focus-v3" and subscription_roles is not None:
+            from agent.analysis import write_log
+            from agent.trading_clock import now
+            from config import LOG_DIR
+            target = current_context["forecast"]["target_session"]
+            write_log(LOG_DIR / "failures" / (target + "." + uuid4().hex + ".us.json"), {
+                "status": "failed", "error_type": type(exc).__name__, "failed_at": now().isoformat(),
+                "target_session": target, "orders_submitted": 0,
+                "budget": subscription_roles.client.report(), "role_input_chars": subscription_roles.role_input_chars})
         raise
     finally:
         if factory is not None:

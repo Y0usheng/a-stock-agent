@@ -37,6 +37,14 @@ AFTER_CLOSE_EVIDENCE_INSTRUCTIONS = (
     "每只股票只输出1条claims，综合正负因素；同一ID不可同时列为支持和反证。风险点可写入该综合结论，不能将支持综合结论的同一财表再列为反证。"
     "新闻标题不等于全文，报告期不等于披露时间；自动片段保留单位与脚注缺口。"
     "只输出自身角色，摘要和每条理由不超过两句；不宣称未发生的审批或成交。")
+US_FORECAST_EVIDENCE_INSTRUCTIONS = (
+    "只使用宿主提供的信息，无需调用工具。每条结论、预测和评审引用本轮同股票的可用 evidence_id。"
+    "历史模型预测和评分仅为内部反馈。发行人标题和摘要只说明可见内容，缺失事实必须写明。"
+    "只读预测无账户，决策全部为 HOLD、股数为0，价格使用冻结参考价。风控评价证据和不确定性。"
+    "每只股票只写一条综合结论。同一条结论的 supporting_ids 与 contradicting_ids 必须完全不同；"
+    "如果一份材料同时含正负因素，用它支持综合结论，并在正文描述其限制。没有独立反证时反证列表留空。"
+    "证据不足时支持列表留空并说明缺口。每条结论给出具体失效条件。引用状态由宿主计算，不输出 status。"
+    "摘要与逐股理由各不超过两句，只返回指定 JSON。")
 
 SUMMARY_SCHEMA = {"type": "object", "properties": {"summary": {"type": "string"}},
                   "required": ["summary"], "additionalProperties": False}
@@ -292,6 +300,10 @@ def subscription_manifest(manifest: dict) -> dict:
         value["template_sha256"] = canonical_hash({"base": value["template_sha256"], "learning": "paper-outcome-learning-v1", "execution": "autonomous-paper-execution-v1",
             "company_projection": "source-table-financial-rows-v8", "financial_protocol": "source-financial-rows-v3", "tasks": "question-tasks-v1", 'research_completion':RESEARCH_PROTOCOL, 'reference_slots':REFERENCE_PROTOCOL, "output_text_limit": 160, "manager_history_samples": 5,
             "company_news_per_symbol": 1, "empty_learning": "counts_only"})
+    if value.get("version") == "manager-us-focus-v3":
+        value["template_sha256"] = canonical_hash({"base": value["template_sha256"],
+            "instructions": US_FORECAST_EVIDENCE_INSTRUCTIONS, "technical_role": "host_quote_indicator_facts_v1",
+            "projection": "prospective-read-only-forecast-v2"})
     return value
 
 
@@ -319,7 +331,7 @@ class SubscriptionRoles:
                 "validation": "id_content_scope_symbol_and_publication_cutoff",
                 "semantic_support_verified": False,
                 **({'wire_reference_protocol':REFERENCE_PROTOCOL, 'wire_reference_slots':{v:k for k,v in self.slots.items()}} if self.slots else {}),
-                **({"role_sources": {"technical-analyst": "host_quote_indicator_facts_v1", "fundamental-analyst": "subscription_model", "investment-manager": "subscription_model", "risk-manager": "independent_subscription_model"}} if self.context.get("timing") else {})}
+                **({"role_sources": {"technical-analyst": "host_quote_indicator_facts_v1", "fundamental-analyst": "subscription_model", "investment-manager": "subscription_model", "risk-manager": "independent_subscription_model"}} if self.context.get("timing") or self.context.get("forecast") else {})}
 
     def technical_snapshot(self):
         claims = []
@@ -340,7 +352,7 @@ class SubscriptionRoles:
 
     async def call(self, name: str, input: str) -> str:
         context = self.context
-        if context.get("timing") and name == "technical-analyst":
+        if (context.get("timing") or context.get("forecast")) and name == "technical-analyst":
             return self.technical_snapshot()
         kinds = ({"market_snapshot"} if name == "technical-analyst" else
                  {"fundamentals", "news"} if name == "fundamental-analyst" else
@@ -475,7 +487,7 @@ class SubscriptionRoles:
         if context.get("timing"):
             instructions = AFTER_CLOSE_EVIDENCE_INSTRUCTIONS
         if context.get("forecast"):
-            instructions += "只读预测无账户，决策全部为 HOLD、股数为0。风控评价证据和不确定性。"
+            instructions = US_FORECAST_EVIDENCE_INSTRUCTIONS
         if self.slots:
             visible = {r['evidence_id'] for r in payload['evidence']}
             payload = rewrite_references(payload, {ref:slot for ref,slot in self.slots.items() if ref in visible})
@@ -488,10 +500,21 @@ class SubscriptionRoles:
         schema = RESULT_EVIDENCE_SCHEMA if name == "investment-manager" else RISK_SCHEMA if name == "risk-manager" else SUMMARY_SCHEMA
         if self.long_term and name == "investment-manager":
             schema = result_schema(schema)
-        if context.get("forecast") and name == "investment-manager":
-            schema = deepcopy(schema)
-            schema["properties"]["predictions"]["items"]["properties"]["horizon_days"]["enum"] = [
-                context["forecast"]["horizon_days"]]
+        if context.get("forecast"):
+            schema = derived_link_schema(schema)
+            fields = schema["properties"]
+            if name == "investment-manager":
+                fields["predictions"]["items"]["properties"]["horizon_days"]["enum"] = [context["forecast"]["horizon_days"]]
+                decision = fields["decisions"]["items"]["properties"]
+                decision["action"]["enum"] = ["HOLD"]
+                decision["shares"]["enum"] = [0]
+            elif name == "risk-manager":
+                assessment = fields["assessments"]["items"]["properties"]
+                assessment["action"]["enum"] = ["HOLD"]
+                assessment["max_shares"]["enum"] = [0]
+                assessment["verdict"]["enum"] = ["APPROVE", "REJECT"]
+            else:
+                fields["claims"].update(minItems=len(context["symbols"]), maxItems=len(context["symbols"]))
         if context.get("timing"):
             schema = derived_link_schema(schema)
             if name in {"technical-analyst", "fundamental-analyst"}:
@@ -503,7 +526,7 @@ class SubscriptionRoles:
         self.raw_outputs[name] = deepcopy(result)
         if self.slots:
             result = restore_visible_references(result, self.slots, visible)
-        if context.get("timing"):
+        if context.get("timing") or context.get("forecast"):
             result = restore_link_status(result)
         if name in {"technical-analyst", "fundamental-analyst"}:
             summary = result.get("summary")

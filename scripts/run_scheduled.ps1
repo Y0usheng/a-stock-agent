@@ -11,6 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($Publish -and ($Market -ne 'cn' -or $Offline -or $Mock -or $env:ASTOCK_OFFLINE -match '^(1|true|yes)$')) { throw '公开发布只支持A股真实资料；不可发布离线或mock运行。' }
 if ($UsFocus -and ($Market -ne 'us' -or $Paper -or $Mock -or $Offline -or $Publish -or $Framework -ne 'langgraph' -or $ModelAccess -ne 'subscription')) { throw '美股收盘研究仅支持真实资料和本机订阅，只分析。' }
+if ($UsFocus -and $env:PYTHONUTF8 -eq '1') { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $pythonPath)) { throw '请先安装项目虚拟环境。' }
